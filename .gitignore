@@ -8,3 +8,4 @@ sessions/
 dist/
 out/
 scratch_*.js
+config.local.json
