@@ -2,7 +2,7 @@
   "OPERATION_MODE": "READ_ONLY",
   "WAVE_API_URL": "https://gql.waveapps.com/graphql/public",
   "LLM_HOST": "http://127.0.0.1",
-  "LLM_PORT": 2574,
+  "LLM_PORT": 1234,
   "PROXY_PORT": 3001,
   "MAX_CONTEXT_TOKENS": 262144
 }
