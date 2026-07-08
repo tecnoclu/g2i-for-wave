@@ -4,7 +4,7 @@
 
 ## ✨ Core Features
 
-* **AI Agentic UI**: Chat naturally with your financial data. Ask complex questions like *"What is the total invoiced for Techsource in 2026?"* and the LLM will dynamically query the Wave GraphQL API to find your answer.
+* **AI Agentic UI**: Chat naturally with your financial data. Ask complex questions like *"What is the total invoiced for Acme Corp in 2026?"* and the LLM will dynamically query the Wave GraphQL API to find your answer.
 * **Local-First Security**: 
   * Your `WAVE_API_TOKEN` and chat history never leave your machine.
   * Connects to local LLMs (e.g., Qwen 3.5 9B via Ollama or LM Studio) to ensure your financial data is never sent to a cloud AI provider.
