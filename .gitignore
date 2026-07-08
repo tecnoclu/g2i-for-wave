@@ -1,0 +1,10 @@
+node_modules/
+.cache/
+.env
+.env.*
+!.env.example
+sessions/
+*.sqlite
+dist/
+out/
+scratch_*.js
