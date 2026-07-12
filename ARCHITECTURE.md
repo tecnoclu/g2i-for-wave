@@ -30,3 +30,11 @@ This document outlines the architectural paradigms and design patterns used in t
 - On the first query, download all data and store it in memory (`globalInvoiceCache`). 
 - On subsequent queries, filter the memory array instantly.
 - Implement a Time-To-Live (TTL) (e.g., 15 minutes). When the TTL expires, do NOT auto-refresh and cause a latency spike. Instead, append a warning to the LLM response, instructing the LLM to ask the user for permission to force a refresh.
+
+## 5. Backend-Driven Data Exporting and Manipulation (The Token-Offload Pattern)
+**The Problem**: Making the LLM format, aggregate, or flatten massive datasets into JSON format to pass to general-purpose utility tools (such as spreadsheet exporters or PDF generators) creates extreme latency (token serialization bottleneck). LLMs write slowly and are prone to minor structural errors when producing large JSON payloads.
+**The Solution**:
+- Offload data flattening, table parsing, calculations, and CSV assembly entirely to the Node.js proxy.
+- Provide parameterized, domain-specific tools (e.g. `export_invoices_report`) where the LLM only has to output a tiny, 30-token query containing command parameters (like date range and format switches).
+- The backend then processes the cached datasets in native JavaScript, saves the file locally, and opens it instantly.
+- **Preserving AI Flexibility**: Maintain rich parameter options on the backend tools (e.g., toggles for nesting line items, date range limits, customer search filters) so the LLM retains maximum flexibility to construct outputs custom-tailored to the user's natural language request.
