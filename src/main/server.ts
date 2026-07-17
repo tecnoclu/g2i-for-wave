@@ -340,7 +340,7 @@ CRITICAL INSTRUCTIONS:
                   type: "object",
                   properties: {
                     header: { type: "string", description: "Spreadsheet column header label, e.g. 'Client Name', 'Total'" },
-                    path: { type: "string", description: "JSON path relative to the invoice object. For line items, start with 'item.' e.g. 'invoiceNumber', 'poNumber', 'invoiceDate', 'customer.name', 'status', 'amountDue.value', 'total.value', 'item.product.name', 'item.description', 'item.quantity', 'item.price', 'item.taxes', 'item.lineTotal'" }
+                    path: { type: "string", description: "JSON path relative to the invoice object. For line items, start with 'item.' e.g. 'invoiceNumber', 'poNumber', 'invoiceDate', 'customer.name', 'status', 'amountDue.value', 'total.value', 'item.product.name', 'item.description', 'item.quantity', 'item.price', 'item.taxes', 'item.lineTotal', 'item.taxAmount', 'item.totalWithTax'" }
                   },
                   required: ["header", "path"]
                 },
@@ -464,21 +464,62 @@ CRITICAL INSTRUCTIONS:
       // Calculate perfect math summary
       let totalInvoiced = 0;
       let totalOutstanding = 0;
+      let totalPreTax = 0;
+      let totalTax = 0;
       results.forEach((i: any) => {
+         let invTotal = 0;
          if (i.total?.value) {
            const cleanVal = i.total.value.toString().replace(/,/g, '');
-           totalInvoiced += parseFloat(cleanVal);
+           invTotal = parseFloat(cleanVal);
+           totalInvoiced += invTotal;
          }
          if (i.amountDue?.value) {
            const cleanVal = i.amountDue.value.toString().replace(/,/g, '');
            totalOutstanding += parseFloat(cleanVal);
+         }
+         
+         let invoicePreTax = 0;
+         let invoiceTax = 0;
+         let hasItemDetail = false;
+
+         if (i.items && i.items.length > 0) {
+           hasItemDetail = true;
+           i.items.forEach((item: any) => {
+             let itemSubtotal = 0;
+             if (item.subtotal?.value) {
+               itemSubtotal = parseFloat(item.subtotal.value.toString().replace(/,/g, ''));
+             } else {
+               const qty = parseFloat(item.quantity || 0);
+               const price = parseFloat(item.price || 0);
+               itemSubtotal = qty * price;
+             }
+             invoicePreTax += itemSubtotal;
+
+             if (item.taxes && item.taxes.length > 0) {
+               item.taxes.forEach((tax: any) => {
+                 if (tax.amount?.value) {
+                   invoiceTax += parseFloat(tax.amount.value.toString().replace(/,/g, ''));
+                 }
+               });
+             }
+           });
+         }
+
+         if (hasItemDetail) {
+           totalPreTax += invoicePreTax;
+           totalTax += invoiceTax;
+         } else {
+           // If no item detail is available, assume pre-tax is invoice total and tax is 0
+           totalPreTax += invTotal;
          }
       });
 
       const response: any = {
         summary: {
           totalInvoiced: parseFloat(totalInvoiced.toFixed(2)),
-          totalOutstanding: parseFloat(totalOutstanding.toFixed(2))
+          totalOutstanding: parseFloat(totalOutstanding.toFixed(2)),
+          totalPreTax: parseFloat(totalPreTax.toFixed(2)),
+          totalTax: parseFloat(totalTax.toFixed(2))
         },
         totalCachedInvoices: cache.invoices.length,
         returnedResults: results.length,
@@ -720,7 +761,9 @@ CRITICAL INSTRUCTIONS:
         { header: 'Quantity', path: 'item.quantity' },
         { header: 'Price', path: 'item.price' },
         { header: 'Tax Names', path: 'item.taxes' },
+        { header: 'Line Tax Amount', path: 'item.taxAmount' },
         { header: 'Line Total', path: 'item.lineTotal' },
+        { header: 'Line Total (Tax Included)', path: 'item.totalWithTax' },
         { header: 'Amount Due', path: 'amountDue.value' },
         { header: 'Invoice Total', path: 'total.value' }
       ];
@@ -740,10 +783,33 @@ CRITICAL INSTRUCTIONS:
                 const itemPath = path.substring(5);
                 if (itemPath === 'taxes') {
                   row[header] = item.taxes?.map((t: any) => t.salesTax?.name).filter(Boolean).join(', ') || '';
+                } else if (itemPath === 'taxAmount') {
+                  let taxSum = 0;
+                  if (item.taxes && item.taxes.length > 0) {
+                    item.taxes.forEach((t: any) => {
+                      if (t.amount?.value) {
+                        taxSum += parseFloat(t.amount.value.toString().replace(/,/g, ''));
+                      }
+                    });
+                  }
+                  row[header] = taxSum.toFixed(2);
                 } else if (itemPath === 'lineTotal') {
                   const qty = parseFloat(item.quantity || 0);
                   const price = parseFloat(item.price || 0);
                   row[header] = (qty * price).toFixed(2);
+                } else if (itemPath === 'totalWithTax') {
+                  const qty = parseFloat(item.quantity || 0);
+                  const price = parseFloat(item.price || 0);
+                  const lineTotal = qty * price;
+                  let taxSum = 0;
+                  if (item.taxes && item.taxes.length > 0) {
+                    item.taxes.forEach((t: any) => {
+                      if (t.amount?.value) {
+                        taxSum += parseFloat(t.amount.value.toString().replace(/,/g, ''));
+                      }
+                    });
+                  }
+                  row[header] = (lineTotal + taxSum).toFixed(2);
                 } else {
                   row[header] = getValueByPath(item, itemPath);
                 }
