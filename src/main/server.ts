@@ -149,7 +149,14 @@ CRITICAL INSTRUCTIONS:
 7. FINANCIAL MATH RULES: 
    - 'total' = What was originally billed (use this for "Total Invoiced"). 
    - 'amountDue' = What is currently unpaid/owed (use this for "Outstanding Balance"). Do NOT mix these up.
-8. DO NOT DO MATH YOURSELF! The caching tools return a 'summary' block at the top of the JSON with the mathematically perfect sums. ALWAYS report the numbers exactly as provided in the summary block.
+8. DO NOT DO MATH YOURSELF! The caching tools return a 'summary' block with mathematically perfect sums (including totalInvoiced, totalOutstanding, totalPaid, totalPreTax, totalTax, taxesBreakdown, and productsBreakdown). ALWAYS report the numbers exactly as provided in the summary block.
+9. MATH DISCLAIMERS: If the user asks a financial mathematical question (e.g. averages, growth rates, margins, or complex calculations not present in the 'summary' block) that forces you to count, sum, or calculate values manually in your head through textual inference, you MUST append the following warning banner to your response:
+   ⚠️ **DISCLAIMER: The calculations above are based on AI text inference and could contain minor inaccuracies. Please verify these numbers before using them for accounting or tax purposes.**
+   Do NOT show this warning if all numbers are retrieved directly from the pre-calculated summary block fields. Only output it if you performed manual math/estimation.
+10. DATA RETRIEVAL & ANTI-FABRICATION GUARDRAIL:
+    - If the user requests ANY information, details, line items, numbers, balances, customer fields, or product attributes that are not explicitly present in your immediate conversation text history, you MUST call the appropriate backend tool to retrieve it.
+    - NEVER guess, predict, extrapolate, or fabricate any data (such as products, descriptions, prices, quantities, taxes, outstanding amounts, statuses, names, or contact info) based on patterns or context. The raw JSON results of tools from previous prompts are not preserved in the chat history.
+    - If no tool exists that can provide the requested information, state clearly that you do not have access to that data, rather than attempting to estimate or hallucinate.
 
 ### WAVE APPS GRAPHQL SCHEMA REFERENCE:
 **Invoice**: id, invoiceNumber, poNumber, invoiceDate (Date), dueDate (Date), amountDue { value }, amountPaid { value }, total { value }, status, customer { id name }, items { description quantity price subtotal { value } total { value } product { id name } taxes { amount { value } salesTax { id name } } }
@@ -464,10 +471,16 @@ CRITICAL INSTRUCTIONS:
       // Calculate perfect math summary
       let totalInvoiced = 0;
       let totalOutstanding = 0;
+      let totalPaid = 0;
       let totalPreTax = 0;
       let totalTax = 0;
+      
+      const taxesBreakdown: { [taxName: string]: number } = {};
+      const productsBreakdown: { [productName: string]: { quantity: number, totalAmount: number } } = {};
+
       results.forEach((i: any) => {
          let invTotal = 0;
+         let invDue = 0;
          if (i.total?.value) {
            const cleanVal = i.total.value.toString().replace(/,/g, '');
            invTotal = parseFloat(cleanVal);
@@ -475,8 +488,12 @@ CRITICAL INSTRUCTIONS:
          }
          if (i.amountDue?.value) {
            const cleanVal = i.amountDue.value.toString().replace(/,/g, '');
-           totalOutstanding += parseFloat(cleanVal);
+           invDue = parseFloat(cleanVal);
+           totalOutstanding += invDue;
          }
+         
+         const invPaid = Math.max(0, invTotal - invDue);
+         totalPaid += invPaid;
          
          let invoicePreTax = 0;
          let invoiceTax = 0;
@@ -495,10 +512,24 @@ CRITICAL INSTRUCTIONS:
              }
              invoicePreTax += itemSubtotal;
 
+             // Product sales breakdown
+             const prodName = item.product?.name || item.description || 'Unknown Product/Service';
+             const qty = parseFloat(item.quantity || 0);
+             if (!productsBreakdown[prodName]) {
+               productsBreakdown[prodName] = { quantity: 0, totalAmount: 0 };
+             }
+             productsBreakdown[prodName].quantity += qty;
+             productsBreakdown[prodName].totalAmount += itemSubtotal;
+
              if (item.taxes && item.taxes.length > 0) {
                item.taxes.forEach((tax: any) => {
                  if (tax.amount?.value) {
-                   invoiceTax += parseFloat(tax.amount.value.toString().replace(/,/g, ''));
+                   const taxAmt = parseFloat(tax.amount.value.toString().replace(/,/g, ''));
+                   invoiceTax += taxAmt;
+
+                   // Taxes breakdown by tax name
+                   const taxName = tax.salesTax?.name || 'Unknown Tax';
+                   taxesBreakdown[taxName] = (taxesBreakdown[taxName] || 0) + taxAmt;
                  }
                });
              }
@@ -514,12 +545,29 @@ CRITICAL INSTRUCTIONS:
          }
       });
 
+      // Format breakdowns for precision
+      const formattedTaxes: { [key: string]: number } = {};
+      Object.keys(taxesBreakdown).forEach(key => {
+        formattedTaxes[key] = parseFloat(taxesBreakdown[key].toFixed(2));
+      });
+
+      const formattedProducts: { [key: string]: { quantity: number, totalAmount: number } } = {};
+      Object.keys(productsBreakdown).forEach(key => {
+        formattedProducts[key] = {
+          quantity: parseFloat(productsBreakdown[key].quantity.toFixed(2)),
+          totalAmount: parseFloat(productsBreakdown[key].totalAmount.toFixed(2))
+        };
+      });
+
       const response: any = {
         summary: {
           totalInvoiced: parseFloat(totalInvoiced.toFixed(2)),
           totalOutstanding: parseFloat(totalOutstanding.toFixed(2)),
+          totalPaid: parseFloat(totalPaid.toFixed(2)),
           totalPreTax: parseFloat(totalPreTax.toFixed(2)),
-          totalTax: parseFloat(totalTax.toFixed(2))
+          totalTax: parseFloat(totalTax.toFixed(2)),
+          taxesBreakdown: formattedTaxes,
+          productsBreakdown: formattedProducts
         },
         totalCachedInvoices: cache.invoices.length,
         returnedResults: results.length,

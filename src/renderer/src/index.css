@@ -178,3 +178,49 @@ body {
   background-color: var(--border);
   cursor: not-allowed;
 }
+
+/* Chat bubble dynamic widening and HTML table styling */
+.message-bubble.wide-bubble {
+  max-width: 95%;
+  width: 100%;
+}
+
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background-color: var(--surface);
+}
+
+.chat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.chat-table th {
+  background-color: var(--bg-color);
+  padding: 10px 12px;
+  font-weight: 500;
+  border-bottom: 2px solid var(--border);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.chat-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.chat-table tr:last-child td {
+  border-bottom: none;
+}
+
+.chat-table tr:hover {
+  background-color: rgba(0,0,0,0.02);
+}

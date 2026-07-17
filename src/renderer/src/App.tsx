@@ -11,6 +11,73 @@ interface Message {
   content: string;
 }
 
+function parseTextFormatting(text: string): React.ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((part, idx) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={idx}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
+}
+
+function renderMessageContent(content: string) {
+  // Regex to check if there is a markdown table in the content
+  const tableRegex = /((?:\|[^\n]+\|\r?\n?)+)/g;
+  const parts = content.split(tableRegex);
+  
+  return parts.map((part, idx) => {
+    if (part.startsWith('|')) {
+      const lines = part.split(/\r?\n/).filter(line => line.trim().startsWith('|'));
+      if (lines.length < 2) return <span key={idx}>{part}</span>;
+      
+      const rows = lines.map(line => {
+        return line
+          .split('|')
+          .slice(1, -1)
+          .map(cell => cell.trim());
+      });
+      
+      const headers = rows[0];
+      const dataRows = rows.slice(1).filter(row => {
+        return !row.every(cell => cell.startsWith(':') || cell.startsWith('-') || cell.endsWith('-'));
+      });
+      
+      return (
+        <div key={idx} className="table-responsive">
+          <table className="chat-table">
+            <thead>
+              <tr>
+                {headers.map((h, i) => <th key={i}>{parseTextFormatting(h)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {dataRows.map((row, rIdx) => (
+                <tr key={rIdx}>
+                  {row.map((cell, cIdx) => <td key={cIdx}>{parseTextFormatting(cell)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+    
+    // Split by newlines to render paragraphs/lists and preserve bold formatting
+    const lines = part.split('\n');
+    return (
+      <span key={idx}>
+        {lines.map((line, lIdx) => (
+          <React.Fragment key={lIdx}>
+            {parseTextFormatting(line)}
+            {lIdx < lines.length - 1 && <br />}
+          </React.Fragment>
+        ))}
+      </span>
+    );
+  });
+}
+
 function App() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [selectedBusinessId, setSelectedBusinessId] = useState<string>('');
@@ -89,13 +156,16 @@ function App() {
               <p>Ask a financial question, e.g., "how much have we invoiced for PO 'abc' for client 'xyz'?"</p>
             </div>
           )}
-          {messages.map((m, idx) => (
-            <div key={idx} className={`message-wrapper ${m.role}`}>
-              <div className="message-bubble">
-                {m.content}
+          {messages.map((m, idx) => {
+            const hasTable = m.content.includes('|');
+            return (
+              <div key={idx} className={`message-wrapper ${m.role}`}>
+                <div className={`message-bubble ${hasTable ? 'wide-bubble' : ''}`}>
+                  {renderMessageContent(m.content)}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {isLoading && (
             <div className="message-wrapper assistant">
               <div className="message-bubble loading">Analyzing...</div>
