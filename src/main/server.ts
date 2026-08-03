@@ -15,17 +15,25 @@ export function startProxyServer(port: number, configPath: string) {
     WAVE_API_URL: 'https://gql.waveapps.com/graphql/public',
     LLM_HOST: 'http://127.0.0.1',
     LLM_PORT: 1234,
-    MAX_CONTEXT_TOKENS: 262144 // Defaulting to max since local models can handle it
+    MAX_CONTEXT_TOKENS: 262144
   };
-  if (existsSync(configPath)) {
-    try {
-      config = { ...config, ...JSON.parse(readFileSync(configPath, 'utf8')) };
-    } catch (e) {
-      console.warn('[Proxy] Failed to parse config.local.json, using defaults.');
+
+  function reloadConfig() {
+    if (existsSync(configPath)) {
+      try {
+        const raw = readFileSync(configPath, 'utf8').trim();
+        if (raw) {
+          config = { ...config, ...JSON.parse(raw) };
+        }
+      } catch (e: any) {
+        console.warn('[Proxy] Failed to parse config.local.json:', e.message);
+      }
     }
   }
+  reloadConfig();
 
-  const getWaveToken = () => process.env.WAVE_API_TOKEN || '';
+  const getWaveToken = () => process.env.WAVE_API_TOKEN || config.WAVE_API_TOKEN || '';
+  const getLlmApiToken = () => process.env.LLM_API_TOKEN || config.LLM_API_TOKEN || '';
 
   // Helper to run wave query securely
   async function runWaveQuery(query: string, variables: any, waveToken: string) {
@@ -119,8 +127,167 @@ export function startProxyServer(port: number, configPath: string) {
     }
   });
 
+  // Endpoint to fetch available models from the LLM provider
+  app.get('/api/llm/models', async (req, res) => {
+    reloadConfig();
+    const llmBase = `${config.LLM_HOST}:${config.LLM_PORT}`;
+    const llmToken = getLlmApiToken();
+
+    const headers: any = {};
+    if (llmToken) {
+      headers['Authorization'] = `Bearer ${llmToken}`;
+    }
+
+    try {
+      // 1. Try standard OpenAI endpoint (/v1/models)
+      let response = await fetch(`${llmBase}/v1/models`, { headers }).catch(() => null);
+
+      // 2. Fallback to /models
+      if (!response || !response.ok) {
+        response = await fetch(`${llmBase}/models`, { headers }).catch(() => null);
+      }
+
+      // 3. Fallback to Ollama /api/tags
+      if (!response || !response.ok) {
+        response = await fetch(`${llmBase}/api/tags`, { headers }).catch(() => null);
+      }
+
+      if (!response || !response.ok) {
+        return res.json({ models: [], error: 'Could not connect to LLM endpoint' });
+      }
+
+      const data = await response.json();
+      let modelsList: { id: string; name: string }[] = [];
+
+      if (Array.isArray(data.data)) {
+        modelsList = data.data.map((m: any) => ({
+          id: m.id || m.name,
+          name: m.id || m.name
+        }));
+      } else if (Array.isArray(data.models)) {
+        modelsList = data.models.map((m: any) => ({
+          id: m.name || m.id,
+          name: m.name || m.id
+        }));
+      }
+
+      res.json({ models: modelsList });
+    } catch (error: any) {
+      console.error('[Proxy] Failed to fetch LLM models:', error.message);
+      res.json({ models: [], error: error.message });
+    }
+  });
+
+  // Endpoint to get current settings
+  app.get('/api/settings', (req, res) => {
+    reloadConfig();
+    res.json({
+      WAVE_API_TOKEN: getWaveToken(),
+      LLM_HOST: config.LLM_HOST || 'http://127.0.0.1',
+      LLM_PORT: config.LLM_PORT || 1234,
+      LLM_API_TOKEN: getLlmApiToken(),
+      OPERATION_MODE: config.OPERATION_MODE || 'READ_ONLY',
+      MAX_CONTEXT_TOKENS: config.MAX_CONTEXT_TOKENS || 262144,
+      SELECTED_BUSINESS_ID: config.SELECTED_BUSINESS_ID || '',
+      SELECTED_MODEL_ID: config.SELECTED_MODEL_ID || ''
+    });
+  });
+
+  // Endpoint to update settings
+  app.post('/api/settings', (req, res) => {
+    try {
+      const { WAVE_API_TOKEN, LLM_HOST, LLM_PORT, LLM_API_TOKEN, OPERATION_MODE, SELECTED_BUSINESS_ID, SELECTED_MODEL_ID } = req.body;
+
+      if (WAVE_API_TOKEN !== undefined) {
+        process.env.WAVE_API_TOKEN = WAVE_API_TOKEN;
+        config.WAVE_API_TOKEN = WAVE_API_TOKEN;
+      }
+      if (LLM_HOST !== undefined) config.LLM_HOST = LLM_HOST;
+      if (LLM_PORT !== undefined) config.LLM_PORT = Number(LLM_PORT);
+      if (LLM_API_TOKEN !== undefined) {
+        process.env.LLM_API_TOKEN = LLM_API_TOKEN;
+        config.LLM_API_TOKEN = LLM_API_TOKEN;
+      }
+      if (OPERATION_MODE !== undefined) config.OPERATION_MODE = OPERATION_MODE;
+      if (SELECTED_BUSINESS_ID !== undefined) config.SELECTED_BUSINESS_ID = SELECTED_BUSINESS_ID;
+      if (SELECTED_MODEL_ID !== undefined) config.SELECTED_MODEL_ID = SELECTED_MODEL_ID;
+
+      writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+      console.log('[Proxy] Updated settings saved to config.local.json');
+      res.json({ success: true, config });
+    } catch (err: any) {
+      console.error('[Proxy] Failed saving settings:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Test Wave API connection endpoint
+  app.post('/api/settings/test-wave', async (req, res) => {
+    const tokenToTest = req.body.waveToken || getWaveToken();
+    if (!tokenToTest) {
+      return res.json({ success: false, error: 'No Wave API token provided to test' });
+    }
+
+    const testQuery = `
+      query {
+        businesses {
+          edges {
+            node {
+              id
+              name
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const data = await runWaveQuery(testQuery, {}, tokenToTest);
+      const count = data.data?.businesses?.edges?.length || 0;
+      res.json({ success: true, count, message: `Successfully connected! Found ${count} business(es).` });
+    } catch (err: any) {
+      res.json({ success: false, error: err.message });
+    }
+  });
+
+  // Test LLM connection endpoint
+  app.post('/api/settings/test-llm', async (req, res) => {
+    const host = req.body.llmHost || config.LLM_HOST || 'http://127.0.0.1';
+    const port = req.body.llmPort || config.LLM_PORT || 1234;
+    const token = req.body.llmToken !== undefined ? req.body.llmToken : getLlmApiToken();
+    const llmBase = `${host}:${port}`;
+
+    const headers: any = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    try {
+      let response = await fetch(`${llmBase}/v1/models`, { headers }).catch(() => null);
+      if (!response || !response.ok) {
+        response = await fetch(`${llmBase}/models`, { headers }).catch(() => null);
+      }
+      if (!response || !response.ok) {
+        response = await fetch(`${llmBase}/api/tags`, { headers }).catch(() => null);
+      }
+
+      if (!response || !response.ok) {
+        return res.json({ success: false, error: `Could not connect to LLM at ${llmBase}` });
+      }
+
+      const data = await response.json();
+      let count = 0;
+      if (Array.isArray(data.data)) count = data.data.length;
+      else if (Array.isArray(data.models)) count = data.models.length;
+
+      res.json({ success: true, count, message: `Successfully connected to LLM at ${llmBase}! Found ${count} model(s).` });
+    } catch (err: any) {
+      res.json({ success: false, error: err.message });
+    }
+  });
+
   app.post('/api/chat', async (req, res) => {
-    const { history, message, businessId } = req.body;
+    const { history, message, businessId, model } = req.body;
     const waveToken = getWaveToken();
     if (!waveToken) return res.status(500).json({ error: 'Wave API token not configured' });
 
@@ -986,25 +1153,37 @@ CRITICAL INSTRUCTIONS:
       ...userHistory
     ];
 
+    let isClientDisconnected = false;
+    req.on('close', () => {
+      isClientDisconnected = true;
+    });
+
     let iterations = 0;
     const MAX_ITERATIONS = 15;
     const previousQueries = new Set<string>();
 
     try {
       while (iterations < MAX_ITERATIONS) {
+        if (isClientDisconnected || req.destroyed || res.writableEnded) {
+          console.log('[Chat] Stopping loop because request was cancelled by user.');
+          return;
+        }
         iterations++;
         console.log(`\n[Chat] --- Iteration ${iterations} ---`);
         console.log(`[Chat] Sending request to LLM...`);
         const llmHeaders: any = { 'Content-Type': 'application/json' };
-        if (process.env.LLM_API_TOKEN) {
-          llmHeaders['Authorization'] = `Bearer ${process.env.LLM_API_TOKEN}`;
+        const llmToken = getLlmApiToken();
+        if (llmToken) {
+          llmHeaders['Authorization'] = `Bearer ${llmToken}`;
         }
         
+        const activeModel = model || config.LLM_MODEL || "local-model";
+
         const llmResponse = await fetch(llmUrl, {
           method: 'POST',
           headers: llmHeaders,
           body: JSON.stringify({
-            model: "local-model",
+            model: activeModel,
             messages: messages,
             tools: tools,
             tool_choice: "auto"
