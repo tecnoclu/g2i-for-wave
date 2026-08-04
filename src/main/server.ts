@@ -32,8 +32,8 @@ export function startProxyServer(port: number, configPath: string) {
   }
   reloadConfig();
 
-  const getWaveToken = () => process.env.WAVE_API_TOKEN || config.WAVE_API_TOKEN || '';
-  const getLlmApiToken = () => process.env.LLM_API_TOKEN || config.LLM_API_TOKEN || '';
+  const getWaveToken = () => config.WAVE_API_TOKEN !== undefined && config.WAVE_API_TOKEN !== '' ? config.WAVE_API_TOKEN : (process.env.WAVE_API_TOKEN || '');
+  const getLlmApiToken = () => config.LLM_API_TOKEN !== undefined && config.LLM_API_TOKEN !== '' ? config.LLM_API_TOKEN : (process.env.LLM_API_TOKEN || '');
 
   // Helper to run wave query securely
   async function runWaveQuery(query: string, variables: any, waveToken: string) {
