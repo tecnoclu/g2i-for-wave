@@ -1,6 +1,6 @@
 {
   "name": "g2i-for-wave",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local-First Financial Analysis Desktop Application",
   "main": "./out/main/index.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "pack": "electron-vite build && electron-builder --dir",
-    "dist": "electron-vite build && electron-builder"
+    "dist": "electron-vite build && electron-builder --win -c.win.forceCodeSigning=false"
   },
   "build": {
     "appId": "com.g2iforwave.app",
@@ -30,7 +30,8 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "G2i-for-Wave-Setup.${ext}"
+      "artifactName": "G2i-for-Wave-Setup.${ext}",
+      "forceCodeSigning": false
     },
     "nsis": {
       "oneClick": false,
