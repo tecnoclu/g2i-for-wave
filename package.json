@@ -23,7 +23,8 @@
     "publish": {
       "provider": "github",
       "owner": "tecnoclu",
-      "repo": "g2i-for-wave"
+      "repo": "g2i-for-wave",
+      "releaseType": "release"
     },
     "win": {
       "target": [
@@ -42,7 +43,7 @@
     "better-sqlite3": "^11.1.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "electron-updater": "^6.8.9",
+    "electron-updater": "^6.3.9",
     "express": "^4.19.2"
   },
   "devDependencies": {
