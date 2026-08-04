@@ -1,6 +1,7 @@
 import { app, shell, BrowserWindow } from 'electron';
 import { join } from 'path';
 import dotenv from 'dotenv';
+import { autoUpdater } from 'electron-updater';
 import { startProxyServer } from './server';
 import { initSessionDb, closeSessionDb } from './db/session';
 import crypto from 'crypto';
@@ -19,7 +20,7 @@ function createWindow(): void {
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false // Sandbox off to allow preload to use Node.js if needed (we use context bridge though)
+      sandbox: false // Sandbox off to allow preload to use Node.js if needed
     }
   });
 
@@ -41,13 +42,20 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  // 1. Initialize Session DB with a unique ID for this instance/session
+  // 1. Check for application updates automatically in production packaged builds
+  if (app.isPackaged) {
+    autoUpdater.checkForUpdatesAndNotify().catch(err => {
+      console.warn('[AutoUpdater] Failed to check for updates:', err.message);
+    });
+  }
+
+  // 2. Initialize Session DB with a unique ID for this instance/session
   const sessionId = crypto.randomUUID();
   initSessionDb(sessionId);
 
-  // 2. Start Secure Proxy Server for Wave API
+  // 3. Start Secure Proxy Server for Wave API
   const configPath = join(__dirname, '../../config.local.json');
-  const port = 3001; // Can be extracted from config if needed
+  const port = 3001;
   startProxyServer(port, configPath);
 
   createWindow();
