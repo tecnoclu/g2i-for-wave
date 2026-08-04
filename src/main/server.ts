@@ -29,11 +29,39 @@ export function startProxyServer(port: number, configPath: string) {
         console.warn('[Proxy] Failed to parse config.local.json:', e.message);
       }
     }
+    
+    // Auto-Migrate Legacy Settings to Connections Array
+    if (!config.LLM_CONNECTIONS || !Array.isArray(config.LLM_CONNECTIONS) || config.LLM_CONNECTIONS.length === 0) {
+      const defaultId = 'default-' + Date.now();
+      config.LLM_CONNECTIONS = [{
+        id: defaultId,
+        name: 'Default LLM',
+        host: config.LLM_HOST || 'http://127.0.0.1',
+        port: config.LLM_PORT || 1234,
+        token: config.LLM_API_TOKEN || ''
+      }];
+      config.ACTIVE_LLM_CONNECTION_ID = defaultId;
+      try {
+        writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+      } catch (e) {
+        // Ignore write err on boot
+      }
+    }
   }
   reloadConfig();
 
   const getWaveToken = () => config.WAVE_API_TOKEN !== undefined && config.WAVE_API_TOKEN !== '' ? config.WAVE_API_TOKEN : (process.env.WAVE_API_TOKEN || '');
-  const getLlmApiToken = () => config.LLM_API_TOKEN !== undefined && config.LLM_API_TOKEN !== '' ? config.LLM_API_TOKEN : (process.env.LLM_API_TOKEN || '');
+  
+  const getActiveLlmConnection = () => {
+    if (!config.LLM_CONNECTIONS) return null;
+    return config.LLM_CONNECTIONS.find((c: any) => c.id === config.ACTIVE_LLM_CONNECTION_ID) || config.LLM_CONNECTIONS[0];
+  };
+
+  const getLlmApiToken = () => {
+    const conn = getActiveLlmConnection();
+    if (conn && conn.token) return conn.token;
+    return process.env.LLM_API_TOKEN || '';
+  };
 
   // Helper to run wave query securely
   async function runWaveQuery(query: string, variables: any, waveToken: string) {
@@ -130,7 +158,10 @@ export function startProxyServer(port: number, configPath: string) {
   // Endpoint to fetch available models from the LLM provider
   app.get('/api/llm/models', async (req, res) => {
     reloadConfig();
-    const llmBase = `${config.LLM_HOST}:${config.LLM_PORT}`;
+    const activeConn = getActiveLlmConnection();
+    const llmHost = activeConn?.host || config.LLM_HOST || 'http://127.0.0.1';
+    const llmPort = activeConn?.port || config.LLM_PORT || 1234;
+    const llmBase = `${llmHost}:${llmPort}`;
     const llmToken = getLlmApiToken();
 
     const headers: any = {};
@@ -183,9 +214,8 @@ export function startProxyServer(port: number, configPath: string) {
     reloadConfig();
     res.json({
       WAVE_API_TOKEN: getWaveToken(),
-      LLM_HOST: config.LLM_HOST || 'http://127.0.0.1',
-      LLM_PORT: config.LLM_PORT || 1234,
-      LLM_API_TOKEN: getLlmApiToken(),
+      LLM_CONNECTIONS: config.LLM_CONNECTIONS || [],
+      ACTIVE_LLM_CONNECTION_ID: config.ACTIVE_LLM_CONNECTION_ID || '',
       OPERATION_MODE: config.OPERATION_MODE || 'READ_ONLY',
       MAX_CONTEXT_TOKENS: config.MAX_CONTEXT_TOKENS || 262144,
       SELECTED_BUSINESS_ID: config.SELECTED_BUSINESS_ID || '',
@@ -194,20 +224,17 @@ export function startProxyServer(port: number, configPath: string) {
   });
 
   // Endpoint to update settings
-  app.post('/api/settings', (req, res) => {
+    app.post('/api/settings', (req, res) => {
     try {
-      const { WAVE_API_TOKEN, LLM_HOST, LLM_PORT, LLM_API_TOKEN, OPERATION_MODE, SELECTED_BUSINESS_ID, SELECTED_MODEL_ID } = req.body;
+      const { WAVE_API_TOKEN, LLM_CONNECTIONS, ACTIVE_LLM_CONNECTION_ID, OPERATION_MODE, SELECTED_BUSINESS_ID, SELECTED_MODEL_ID } = req.body;
+      console.log(`[Proxy] POST /api/settings received update. Contains connections: ${!!LLM_CONNECTIONS}`);
 
       if (WAVE_API_TOKEN !== undefined) {
         process.env.WAVE_API_TOKEN = WAVE_API_TOKEN;
         config.WAVE_API_TOKEN = WAVE_API_TOKEN;
       }
-      if (LLM_HOST !== undefined) config.LLM_HOST = LLM_HOST;
-      if (LLM_PORT !== undefined) config.LLM_PORT = Number(LLM_PORT);
-      if (LLM_API_TOKEN !== undefined) {
-        process.env.LLM_API_TOKEN = LLM_API_TOKEN;
-        config.LLM_API_TOKEN = LLM_API_TOKEN;
-      }
+      if (LLM_CONNECTIONS !== undefined) config.LLM_CONNECTIONS = LLM_CONNECTIONS;
+      if (ACTIVE_LLM_CONNECTION_ID !== undefined) config.ACTIVE_LLM_CONNECTION_ID = ACTIVE_LLM_CONNECTION_ID;
       if (OPERATION_MODE !== undefined) config.OPERATION_MODE = OPERATION_MODE;
       if (SELECTED_BUSINESS_ID !== undefined) config.SELECTED_BUSINESS_ID = SELECTED_BUSINESS_ID;
       if (SELECTED_MODEL_ID !== undefined) config.SELECTED_MODEL_ID = SELECTED_MODEL_ID;
@@ -252,8 +279,8 @@ export function startProxyServer(port: number, configPath: string) {
 
   // Test LLM connection endpoint
   app.post('/api/settings/test-llm', async (req, res) => {
-    const host = req.body.llmHost || config.LLM_HOST || 'http://127.0.0.1';
-    const port = req.body.llmPort || config.LLM_PORT || 1234;
+    const host = req.body.llmHost || (getActiveLlmConnection()?.host) || 'http://127.0.0.1';
+    const port = req.body.llmPort || (getActiveLlmConnection()?.port) || 1234;
     const token = req.body.llmToken !== undefined ? req.body.llmToken : getLlmApiToken();
     const llmBase = `${host}:${port}`;
 
@@ -291,10 +318,14 @@ export function startProxyServer(port: number, configPath: string) {
     const waveToken = getWaveToken();
     if (!waveToken) return res.status(500).json({ error: 'Wave API token not configured' });
 
-    const llmUrl = `${config.LLM_HOST}:${config.LLM_PORT}/v1/chat/completions`;
+    const activeConn = getActiveLlmConnection();
+    const llmHost = activeConn?.host || config.LLM_HOST || 'http://127.0.0.1';
+    const llmPort = activeConn?.port || config.LLM_PORT || 1234;
+    const llmUrl = `${llmHost}:${llmPort}/v1/chat/completions`;
 
     const systemPrompt = `You are a financial analysis assistant for WaveApps. You help the user analyze their financial data and manage invoices/estimates.
 When the user asks for data or actions:
+- You MUST rely on your available tools to fulfill the request. DO NOT ask the user for permission to use tools. Execute them immediately.
 - Use the 'search_cached_invoices' tool for invoices.
 - Use the 'search_cached_customers' tool for customers.
 - Use the 'list_cached_products' tool for products/services catalog.
@@ -324,6 +355,7 @@ CRITICAL INSTRUCTIONS:
     - If the user requests ANY information, details, line items, numbers, balances, customer fields, or product attributes that are not explicitly present in your immediate conversation text history, you MUST call the appropriate backend tool to retrieve it.
     - NEVER guess, predict, extrapolate, or fabricate any data (such as products, descriptions, prices, quantities, taxes, outstanding amounts, statuses, names, or contact info) based on patterns or context. The raw JSON results of tools from previous prompts are not preserved in the chat history.
     - If no tool exists that can provide the requested information, state clearly that you do not have access to that data, rather than attempting to estimate or hallucinate.
+11. MANDATORY TOOL EXECUTION POLICY: You MUST NOT ask the user "Would you like me to run a search?" or "Should I use a tool?". If you need data to answer the user's prompt, YOU MUST immediately call the appropriate tool. Do not ask for permission.
 
 ### WAVE APPS GRAPHQL SCHEMA REFERENCE:
 **Invoice**: id, invoiceNumber, poNumber, invoiceDate (Date), dueDate (Date), amountDue { value }, amountPaid { value }, total { value }, status, customer { id name }, items { description quantity price subtotal { value } total { value } product { id name } taxes { amount { value } salesTax { id name } } }
@@ -1153,21 +1185,17 @@ CRITICAL INSTRUCTIONS:
       ...userHistory
     ];
 
-    let isClientDisconnected = false;
-    req.on('close', () => {
-      isClientDisconnected = true;
+    const abortController = new AbortController();
+    req.on('aborted', () => {
+      console.log('[Chat] Client explicitly aborted request via Stop button. Cancelling LLM generation.');
+      abortController.abort();
     });
-
     let iterations = 0;
     const MAX_ITERATIONS = 15;
     const previousQueries = new Set<string>();
 
     try {
       while (iterations < MAX_ITERATIONS) {
-        if (isClientDisconnected || req.destroyed || res.writableEnded) {
-          console.log('[Chat] Stopping loop because request was cancelled by user.');
-          return;
-        }
         iterations++;
         console.log(`\n[Chat] --- Iteration ${iterations} ---`);
         console.log(`[Chat] Sending request to LLM...`);
@@ -1177,16 +1205,24 @@ CRITICAL INSTRUCTIONS:
           llmHeaders['Authorization'] = `Bearer ${llmToken}`;
         }
         
-        const activeModel = model || config.LLM_MODEL || "local-model";
+        const activeModel = model || activeConn?.selectedModelId || config.SELECTED_MODEL_ID || "local-model";
+
+        // Set a 2-minute safety timeout to prevent infinite hanging if the LLM server deadlocks
+        const timeoutId = setTimeout(() => {
+          console.warn('[Chat] LLM request timed out after 120 seconds. Aborting.');
+          abortController.abort();
+        }, 120000);
 
         const llmResponse = await fetch(llmUrl, {
           method: 'POST',
           headers: llmHeaders,
+          signal: abortController.signal,
           body: JSON.stringify({
             model: activeModel,
             messages: messages,
             tools: tools,
-            tool_choice: "auto"
+            tool_choice: "auto",
+            max_tokens: 1500
           })
         });
 
@@ -1195,8 +1231,23 @@ CRITICAL INSTRUCTIONS:
         }
 
         const llmData = await llmResponse.json();
+        clearTimeout(timeoutId); // Clear timeout on success
+        
         const responseMessage = llmData.choices[0].message;
         
+        // Fix for local LLMs (like Ollama/LM Studio) that crash or hang when content is null
+        if (responseMessage.content === null || responseMessage.content === undefined) {
+          responseMessage.content = "";
+        }
+        
+        // Strip <think>...</think> blocks from reasoning models (e.g., DeepSeek-R1, Qwen-MTP)
+        // This prevents their internal monologue from bleeding into the UI, and stops
+        // their pseudo-code from triggering the XML fallback parser and causing endless loops.
+        responseMessage.content = responseMessage.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+        // Also handle cases where the model might output an unclosed </think> tag due to weird formatting
+        responseMessage.content = responseMessage.content.replace(/<\/think>/gi, '').trim();
+
         console.log('[Chat] Received response from LLM. Tool calls present:', !!responseMessage.tool_calls);
 
         // Parse Tool Call (Standard JSON or Fallback XML)
@@ -1222,156 +1273,153 @@ CRITICAL INSTRUCTIONS:
         }
 
         if ((responseMessage.tool_calls && responseMessage.tool_calls.length > 0) || isXmlToolCall) {
-          let queryToRun = '';
-          let toolCallId = 'xml-fallback';
-          let isStandardToolCall = false;
-          let queryVariables = {};
+          
+          // Append the assistant's message with the tool_calls first
+          const cleanAssistantMessage: any = {
+            role: "assistant",
+            content: responseMessage.content || "",
+            tool_calls: responseMessage.tool_calls
+          };
+          messages.push(cleanAssistantMessage);
 
+          // Prepare array of calls to process
+          const toolCallsToProcess = [];
           if (isXmlToolCall && xmlQuery) {
-            queryToRun = xmlQuery;
-          } else if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
-            const toolCall = responseMessage.tool_calls[0];
-            toolCallId = toolCall.id;
-            isStandardToolCall = true;
-            const args = JSON.parse(toolCall.function.arguments);
-            queryToRun = args.query || JSON.stringify(args);
-            queryVariables = args.variables || {};
-          }
-            
-          console.log('[Chat] Executing Wave GraphQL Query:\n', queryToRun);
-          
-          // Loop Prevention: If the exact same query is run twice, force an answer.
-          if (previousQueries.has(queryToRun.trim())) {
-             console.log('[Chat] Detected duplicate query. Forcing the LLM to answer instead of looping.');
-             messages.push(responseMessage);
-             messages.push({
-               role: "user",
-               content: "You already executed this exact same query. Please stop querying and provide the final natural language answer to the user based on the data you have."
-             });
-             continue;
-          }
-          previousQueries.add(queryToRun.trim());
-
-          let queryResult;
-          let executedToolName = 'query_wave_graphql';
-
-          if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'search_cached_invoices') {
-            executedToolName = 'search_cached_invoices';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeSearchInvoices(args);
-              console.log('[Chat] Local Cache Search Successful');
-            } catch (err: any) {
-              console.error('[Chat] Local Cache Search Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'search_cached_customers') {
-            executedToolName = 'search_cached_customers';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeSearchCustomers(args);
-              console.log('[Chat] Customer Cache Search Successful');
-            } catch (err: any) {
-              console.error('[Chat] Customer Cache Search Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'list_cached_products') {
-            executedToolName = 'list_cached_products';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeSearchProducts(args);
-              console.log('[Chat] Product Cache Search Successful');
-            } catch (err: any) {
-              console.error('[Chat] Product Cache Search Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'manage_invoice_or_estimate') {
-            executedToolName = 'manage_invoice_or_estimate';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeManageInvoiceOrEstimate(args);
-              console.log('[Chat] Manage Invoice/Estimate Successful');
-            } catch (err: any) {
-              console.error('[Chat] Manage Invoice/Estimate Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'export_invoices_report') {
-            executedToolName = 'export_invoices_report';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeExportInvoicesReport(args);
-              console.log('[Chat] Export Invoices Report Successful');
-            } catch (err: any) {
-              console.error('[Chat] Export Invoices Report Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'export_to_spreadsheet') {
-            executedToolName = 'export_to_spreadsheet';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeExportToSpreadsheet(args);
-              console.log('[Chat] Export to Spreadsheet Successful');
-            } catch (err: any) {
-              console.error('[Chat] Export to Spreadsheet Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'generate_pdf_document') {
-            executedToolName = 'generate_pdf_document';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeGeneratePdfDocument(args);
-              console.log('[Chat] Generate PDF Document Successful');
-            } catch (err: any) {
-              console.error('[Chat] Generate PDF Document Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else if (isStandardToolCall && responseMessage.tool_calls[0].function.name === 'draft_system_email') {
-            executedToolName = 'draft_system_email';
-            try {
-              const args = JSON.parse(responseMessage.tool_calls[0].function.arguments);
-              queryResult = await executeDraftSystemEmail(args);
-              console.log('[Chat] Draft System Email Successful');
-            } catch (err: any) {
-              console.error('[Chat] Draft System Email Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          } else {
-            try {
-              queryResult = await runWaveQuery(queryToRun, queryVariables, waveToken);
-              console.log('[Chat] Wave API Query Successful');
-            } catch (err: any) {
-              console.error('[Chat] Wave API Query Error:', err.message);
-              queryResult = { error: err.message };
-            }
-          }
-
-          let resultString = JSON.stringify(queryResult);
-          // Significantly increased the default context limit so JSON doesn't get broken easily
-          const maxChars = (config.MAX_CONTEXT_TOKENS || 8192) * 4;
-          if (resultString.length > maxChars) {
-            console.log('[Chat] Truncating Wave API Response...');
-            resultString = resultString.substring(0, maxChars) + '... [TRUNCATED DUE TO CONTEXT LIMITS]';
-          }
-
-          messages.push(responseMessage);
-          
-          if (isStandardToolCall) {
-            messages.push({
-              role: "tool",
-              // @ts-ignore
-              tool_call_id: toolCallId,
-              name: executedToolName,
-              content: resultString
+            toolCallsToProcess.push({
+              id: 'xml-fallback',
+              isXml: true,
+              name: 'query_wave_graphql',
+              args: { query: xmlQuery }
             });
-          } else {
-            messages.push({
-              role: "user",
-              content: `The system executed your GraphQL query. Here is the result data from WaveApps:\n\n${resultString}\n\nCRITICAL: If you have enough data, provide the final answer to the user now (without any XML tool calls). If you need more data (e.g. next page), output another tool call.`
-            });
+          } else if (responseMessage.tool_calls) {
+            for (const tc of responseMessage.tool_calls) {
+              let parsedArgs = {};
+              try {
+                parsedArgs = JSON.parse(tc.function.arguments);
+              } catch (e) {
+                console.warn('[Chat] Failed to parse tool arguments:', tc.function.arguments);
+              }
+              toolCallsToProcess.push({
+                id: tc.id,
+                isXml: false,
+                name: tc.function.name,
+                args: parsedArgs
+              });
+            }
           }
 
-          console.log('[Chat] Data appended to context. Continuing loop for LLM analysis...');
-          continue; // Loop again to let LLM analyze the new data
+          // Process each tool call sequentially
+          for (const tc of toolCallsToProcess) {
+            let queryResult;
+            const executedToolName = tc.name;
+
+            if (tc.name === 'search_cached_invoices') {
+              try {
+                queryResult = await executeSearchInvoices(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else if (tc.name === 'search_cached_customers') {
+              try {
+                queryResult = await executeSearchCustomers(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else if (tc.name === 'list_cached_products') {
+              try {
+                queryResult = await executeSearchProducts(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else if (tc.name === 'manage_invoice_or_estimate') {
+              try {
+                queryResult = await executeManageInvoiceOrEstimate(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else if (tc.name === 'export_invoices_report') {
+              try {
+                queryResult = await executeExportInvoicesReport(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else if (tc.name === 'export_to_spreadsheet') {
+              try {
+                queryResult = await executeExportToSpreadsheet(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else if (tc.name === 'generate_pdf_document') {
+              try {
+                queryResult = await executeGeneratePdfDocument(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else if (tc.name === 'draft_system_email') {
+              try {
+                queryResult = await executeDraftSystemEmail(tc.args);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            } else {
+              // Default to query_wave_graphql or xml fallback
+              let queryToRun = tc.args.query || JSON.stringify(tc.args);
+              let queryVariables = tc.args.variables || {};
+              
+              console.log('[Chat] Executing Wave GraphQL Query:\n', queryToRun);
+              
+              // Loop Prevention
+              if (previousQueries.has(queryToRun.trim())) {
+                 console.log('[Chat] Detected duplicate query. Forcing the LLM to answer instead of looping.');
+                 messages.push({
+                   role: "tool",
+                   tool_call_id: tc.id,
+                   name: executedToolName,
+                   content: "You already executed this exact same query. Please stop querying and provide the final natural language answer to the user based on the data you have."
+                 });
+                 continue;
+              }
+              previousQueries.add(queryToRun.trim());
+
+              try {
+                queryResult = await runWaveQuery(queryToRun, queryVariables, waveToken);
+                console.log(`[Chat] Tool ${tc.name} Successful`);
+              } catch (err: any) {
+                queryResult = { error: err.message };
+              }
+            }
+
+            let resultString = JSON.stringify(queryResult);
+            const maxChars = (config.MAX_CONTEXT_TOKENS || 8192) * 4;
+            if (resultString.length > maxChars) {
+              console.log('[Chat] Truncating Tool API Response...');
+              resultString = resultString.substring(0, maxChars) + '... [TRUNCATED DUE TO CONTEXT LIMITS]';
+            }
+
+            if (!tc.isXml) {
+              messages.push({
+                role: "tool",
+                tool_call_id: tc.id,
+                name: executedToolName,
+                content: resultString
+              });
+            } else {
+              messages.push({
+                role: "user",
+                content: `The system executed your GraphQL query. Here is the result data from WaveApps:\n\n${resultString}\n\nCRITICAL: If you have enough data, provide the final answer to the user now (without any XML tool calls). If you need more data (e.g. next page), output another tool call.`
+              });
+            }
+          }
+          
+          continue; // Loop to next iteration
         }
 
         // No tool called, we assume this is the final answer or a clarifying question
@@ -1383,8 +1431,19 @@ CRITICAL INSTRUCTIONS:
       return res.json({ answer: "I needed to make too many requests to fetch that data. Could you please narrow down your search (e.g., specific dates or PO number)?" });
 
     } catch (error: any) {
+      if (error.name === 'AbortError') {
+        if (!req.destroyed) {
+          // If req is not destroyed, the Express server triggered the abort via timeout!
+          // We MUST respond to the client so the UI stops hanging.
+          return res.status(504).json({ error: 'LLM Server timed out after 120 seconds' });
+        }
+        console.log('[Chat] LLM generation halted because the client aborted the request.');
+        return;
+      }
       console.error('[Chat Error]', error);
-      res.status(500).json({ error: 'LLM Orchestration error', details: error.message });
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'LLM Orchestration error', details: error.message });
+      }
     }
   });
 

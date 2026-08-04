@@ -1,7 +1,7 @@
 {
   "name": "g2i-for-wave",
-  "version": "1.0.1",
-  "description": "Local-First Financial Analysis Desktop Application",
+  "version": "1.0.2",
+  "description": "G2i Desktop Assistant for WaveApps",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

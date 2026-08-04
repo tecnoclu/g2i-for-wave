@@ -538,17 +538,19 @@ body {
 
 /* Stop Generation Button */
 .input-area .stop-btn {
-  padding: 0 20px;
-  background-color: #dc2626;
+  padding: 0 12px;
+  background-color: #ef4444;
   color: white;
   border: none;
   border-radius: 4px;
-  font-size: 1rem;
+  font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
   transition: background-color 0.2s;
+  height: 36px;
+  align-self: center;
 }
 
 .input-area .stop-btn:hover {
-  background-color: #b91c1c;
+  background-color: #dc2626;
 }

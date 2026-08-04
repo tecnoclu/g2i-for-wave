@@ -100,9 +100,16 @@ function App() {
   const [waveToken, setWaveToken] = useState('');
   const [showWaveToken, setShowWaveToken] = useState(false);
   
-  const [llmHost, setLlmHost] = useState('');
-  const [llmPort, setLlmPort] = useState('');
-  const [llmToken, setLlmToken] = useState('');
+  interface LlmConnection {
+    id: string;
+    name: string;
+    host: string;
+    port: string | number;
+    token: string;
+    selectedModelId?: string;
+  }
+  const [llmConnections, setLlmConnections] = useState<LlmConnection[]>([]);
+  const [activeConnectionId, setActiveConnectionId] = useState('');
   const [showLlmToken, setShowLlmToken] = useState(false);
   
   const [operationMode, setOperationMode] = useState('READ_ONLY');
@@ -141,8 +148,13 @@ function App() {
     }
   };
 
-  const loadModels = async (initialSavedId?: string) => {
-    const savedModelId = initialSavedId || localStorage.getItem('g2i_selected_model');
+  const loadModels = async (initialSavedId?: string, targetConnId?: string) => {
+    let savedModelId = initialSavedId;
+    if (!savedModelId) {
+      const activeId = targetConnId || activeConnectionId || llmConnections[0]?.id;
+      const conn = llmConnections.find(c => c.id === activeId);
+      if (conn?.selectedModelId) savedModelId = conn.selectedModelId;
+    }
     try {
       const res = await fetch(window.api.getProxyUrl() + '/api/llm/models');
       const data = await res.json();
@@ -150,13 +162,14 @@ function App() {
       setModels(fetchedModels);
       if (fetchedModels.length > 0) {
         if (savedModelId && fetchedModels.some((m: LlmModel) => m.id === savedModelId)) {
-          setSelectedModelId(savedModelId);
+          // Found the saved model, ensure state is updated
+          handleModelChange(savedModelId, true, targetConnId);
         } else {
-          setSelectedModelId(fetchedModels[0].id);
-          localStorage.setItem('g2i_selected_model', fetchedModels[0].id);
+          // Auto-select first model
+          handleModelChange(fetchedModels[0].id, true, targetConnId);
         }
       } else if (savedModelId) {
-        setSelectedModelId(savedModelId);
+        handleModelChange(savedModelId, true, targetConnId);
       }
     } catch (err) {
       console.warn('Failed to load LLM models:', err);
@@ -164,17 +177,18 @@ function App() {
   };
 
   useEffect(() => {
-    // Load initial settings first to get stored SELECTED_BUSINESS_ID and SELECTED_MODEL_ID from config.local.json
+    // Load initial settings first to get stored settings from config.local.json
     fetch(window.api.getProxyUrl() + '/api/settings')
       .then(res => res.json())
       .then(settings => {
         loadBusinesses(settings.SELECTED_BUSINESS_ID);
-        loadModels(settings.SELECTED_MODEL_ID);
+        
+        // Find the active profile to load its specific model
+        const activeId = settings.ACTIVE_LLM_CONNECTION_ID;
+        const activeConn = settings.LLM_CONNECTIONS?.find((c: any) => c.id === activeId);
+        loadModels(activeConn?.selectedModelId);
       })
-      .catch(() => {
-        loadBusinesses();
-        loadModels();
-      });
+      .catch(err => console.warn('Failed loading initial settings:', err));
   }, []);
 
   const handleBusinessChange = (newBusinessId: string) => {
@@ -188,15 +202,58 @@ function App() {
     }).catch(err => console.warn('Failed saving business selection to config.local.json:', err));
   };
 
-  const handleModelChange = (newModelId: string) => {
+  const handleModelChange = (newModelId: string, skipSaveBackendIfSame = false, targetConnId?: string) => {
     setSelectedModelId(newModelId);
-    localStorage.setItem('g2i_selected_model', newModelId);
-    // Persist to local config file (gitignored)
-    fetch(window.api.getProxyUrl() + '/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ SELECTED_MODEL_ID: newModelId })
-    }).catch(err => console.warn('Failed saving model selection to config.local.json:', err));
+    
+    // Update the active connection profile with the new model
+    setLlmConnections(prevConnections => {
+      // Safely determine which connection we are actually modifying
+      const activeId = targetConnId || activeConnectionId || prevConnections[0]?.id;
+      if (!activeId) return prevConnections;
+
+      const currentConn = prevConnections.find(c => c.id === activeId);
+      if (skipSaveBackendIfSame && currentConn?.selectedModelId === newModelId) {
+        return prevConnections; // No need to save if nothing changed
+      }
+
+      const updatedConnections = prevConnections.map(conn => {
+        if (conn.id === activeId) {
+          return { ...conn, selectedModelId: newModelId };
+        }
+        return conn;
+      });
+
+      // Persist updated connections array to backend
+      fetch(window.api.getProxyUrl() + '/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ LLM_CONNECTIONS: updatedConnections })
+      }).catch(err => console.warn('Failed saving model selection to config.local.json:', err));
+
+      return updatedConnections;
+    });
+  };
+
+  const handleConnectionChange = async (newConnectionId: string) => {
+    setActiveConnectionId(newConnectionId);
+    
+    // Find the profile and its saved model ID
+    const conn = llmConnections.find(c => c.id === newConnectionId);
+    const profileModelId = conn?.selectedModelId;
+
+    // Persist active connection change to backend so loadModels hits the right server
+    try {
+      await fetch(window.api.getProxyUrl() + '/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ACTIVE_LLM_CONNECTION_ID: newConnectionId })
+      });
+      // Now that backend is pointing to the new server, load its models
+      // Pass the profile's specific model ID so it auto-selects correctly
+      loadModels(profileModelId, newConnectionId);
+    } catch (err) {
+      console.warn('Failed saving active connection to config.local.json:', err);
+    }
   };
 
   const openSettings = () => {
@@ -207,9 +264,8 @@ function App() {
       .then(res => res.json())
       .then(data => {
         setWaveToken(data.WAVE_API_TOKEN || '');
-        setLlmHost(data.LLM_HOST || 'http://127.0.0.1');
-        setLlmPort(String(data.LLM_PORT || 1234));
-        setLlmToken(data.LLM_API_TOKEN || '');
+        setLlmConnections(data.LLM_CONNECTIONS || []);
+        setActiveConnectionId(data.ACTIVE_LLM_CONNECTION_ID || '');
         setOperationMode(data.OPERATION_MODE || 'READ_ONLY');
         setIsSettingsOpen(true);
       })
@@ -261,15 +317,22 @@ function App() {
   const testLlmConnection = async () => {
     setIsTestingLlm(true);
     setLlmTestResult(null);
+    const activeConn = llmConnections.find(c => c.id === activeConnectionId);
+    if (!activeConn) {
+      setIsTestingLlm(false);
+      return;
+    }
     try {
       const res = await fetch(window.api.getProxyUrl() + '/api/settings/test-llm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ llmHost, llmPort: Number(llmPort), llmToken })
+        body: JSON.stringify({ llmHost: activeConn.host, llmPort: Number(activeConn.port), llmToken: activeConn.token })
       });
       const data = await res.json();
       if (data.success) {
         setLlmTestResult({ type: 'success', text: `✅ ${data.message}` });
+        // Immediately load models for this newly tested server
+        loadModels(activeConn.selectedModelId, activeConnectionId);
       } else {
         setLlmTestResult({ type: 'error', text: `❌ LLM Error: ${data.error}` });
       }
@@ -278,6 +341,29 @@ function App() {
     } finally {
       setIsTestingLlm(false);
     }
+  };
+
+  const deleteActiveConnection = () => {
+    if (llmConnections.length <= 1) {
+      alert("You must have at least one LLM connection.");
+      return;
+    }
+    const newConns = llmConnections.filter(c => c.id !== activeConnectionId);
+    setLlmConnections(newConns);
+    setActiveConnectionId(newConns[0].id);
+  };
+
+  const updateActiveConnection = (field: keyof LlmConnection, value: string | number) => {
+    setLlmConnections(prev => {
+      const newConns = prev.map(c => c.id === activeConnectionId ? { ...c, [field]: value } : c);
+      // Auto-save to backend so that the React UI and Node backend never get desynced
+      fetch(window.api.getProxyUrl() + '/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ LLM_CONNECTIONS: newConns })
+      }).catch(err => console.warn('Failed auto-saving connection:', err));
+      return newConns;
+    });
   };
 
   const saveSettings = async (e: React.FormEvent) => {
@@ -291,9 +377,8 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           WAVE_API_TOKEN: waveToken,
-          LLM_HOST: llmHost,
-          LLM_PORT: Number(llmPort),
-          LLM_API_TOKEN: llmToken,
+          LLM_CONNECTIONS: llmConnections,
+          ACTIVE_LLM_CONNECTION_ID: activeConnectionId,
           OPERATION_MODE: operationMode
         })
       });
@@ -302,7 +387,7 @@ function App() {
 
       setSettingsStatus({ type: 'success', text: 'Settings saved successfully!' });
       loadBusinesses();
-      loadModels();
+      loadModels(undefined, activeConnectionId);
       setTimeout(() => setIsSettingsOpen(false), 1200);
     } catch (err: any) {
       setSettingsStatus({ type: 'error', text: err.message });
@@ -379,17 +464,8 @@ function App() {
             </select>
           </div>
 
-          <div className="selector-group">
-            <label>Model: </label>
-            <select 
-              value={selectedModelId} 
-              onChange={(e) => handleModelChange(e.target.value)}
-            >
-              {models.length === 0 && <option value={selectedModelId || "local-model"}>{selectedModelId || "Default (local-model)"}</option>}
-              {models.map(m => (
-                <option key={m.id} value={m.id}>{m.name}</option>
-              ))}
-            </select>
+          <div className="selector-group" style={{ visibility: 'hidden', width: 0, padding: 0, margin: 0, overflow: 'hidden' }}>
+            {/* Keeping the DOM structure intact to prevent css flex issues if any, but hiding it */}
           </div>
 
           <button className="settings-btn" onClick={openSettings} title="Settings">
@@ -495,62 +571,89 @@ function App() {
                 )}
               </div>
 
-              {/* LLM Connection Fields */}
-              <div className="form-row">
-                <div className="form-group flex-2">
-                  <label>LLM Host Base URL</label>
-                  <input 
-                    type="text" 
-                    value={llmHost}
-                    onChange={(e) => setLlmHost(e.target.value)}
-                    placeholder="http://127.0.0.1 or http://localhost"
-                    required
-                  />
-                </div>
-                <div className="form-group flex-1">
-                  <label>LLM Port</label>
-                  <input 
-                    type="number" 
-                    value={llmPort}
-                    onChange={(e) => setLlmPort(e.target.value)}
-                    placeholder="1234 / 2574"
-                    required
-                  />
-                </div>
-              </div>
+              {/* LLM Connection Profiles */}
+              <div className="form-group" style={{ background: 'var(--surface-color)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)', marginBottom: '1.5rem' }}>
+                <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                  <span>LLM Connection Profile</span>
+                  <button type="button" className="btn-secondary" style={{ padding: '4px 8px', fontSize: '0.8rem' }} onClick={deleteActiveConnection}>🗑️ Delete</button>
+                </label>
+                
+                <select 
+                  value={activeConnectionId} 
+                  onChange={(e) => {
+                    if (e.target.value === 'NEW') {
+                      const newId = 'conn-' + Date.now();
+                      const newConnections = [...llmConnections, { id: newId, name: 'New Connection', host: 'http://127.0.0.1', port: 1234, token: '' }];
+                      setLlmConnections(newConnections);
+                      // Save the new connection array first, then set it as active
+                      fetch(window.api.getProxyUrl() + '/api/settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ LLM_CONNECTIONS: newConnections })
+                      }).then(() => handleConnectionChange(newId));
+                    } else {
+                      handleConnectionChange(e.target.value);
+                    }
+                  }}
+                  style={{ marginBottom: '15px' }}
+                >
+                  {llmConnections.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                  <option value="NEW">➕ Add New Connection...</option>
+                </select>
 
-              {/* LLM API Token */}
-              <div className="form-group">
-                <label>LLM API Token (Optional, Masked)</label>
-                <div className="input-with-button">
-                  <input 
-                    type={showLlmToken ? "text" : "password"} 
-                    value={llmToken}
-                    onChange={(e) => setLlmToken(e.target.value)}
-                    placeholder="Optional for local models / Required for OpenAI"
-                  />
-                  <button 
-                    type="button" 
-                    className="toggle-mask-btn"
-                    onClick={() => setShowLlmToken(!showLlmToken)}
-                    title={showLlmToken ? "Hide Token" : "Show Token"}
-                  >
-                    {showLlmToken ? "🙈" : "👁️"}
-                  </button>
-                  <button 
-                    type="button" 
-                    className="test-btn" 
-                    onClick={testLlmConnection}
-                    disabled={isTestingLlm || !llmHost || !llmPort}
-                  >
-                    {isTestingLlm ? "Testing..." : "Test LLM Connection"}
-                  </button>
-                </div>
-                {llmTestResult && (
-                  <div className={`test-badge ${llmTestResult.type}`}>
-                    {llmTestResult.text}
-                  </div>
-                )}
+                {llmConnections.find(c => c.id === activeConnectionId) && (() => {
+                  const active = llmConnections.find(c => c.id === activeConnectionId)!;
+                  return (
+                    <>
+                      <div className="form-group">
+                        <label>Profile Name</label>
+                        <input type="text" value={active.name} onChange={(e) => updateActiveConnection('name', e.target.value)} required />
+                      </div>
+                      <div className="form-row">
+                        <div className="form-group flex-2">
+                          <label>LLM Host Base URL</label>
+                          <input type="text" value={active.host} onChange={(e) => updateActiveConnection('host', e.target.value)} placeholder="http://127.0.0.1" required />
+                        </div>
+                        <div className="form-group flex-1">
+                          <label>LLM Port</label>
+                          <input type="number" value={active.port} onChange={(e) => updateActiveConnection('port', e.target.value)} placeholder="1234" required />
+                        </div>
+                      </div>
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <label>LLM API Token (Optional, Masked)</label>
+                        <div className="input-with-button">
+                          <input type={showLlmToken ? "text" : "password"} value={active.token} onChange={(e) => updateActiveConnection('token', e.target.value)} placeholder="Optional for local models" />
+                          <button type="button" className="toggle-mask-btn" onClick={() => setShowLlmToken(!showLlmToken)} title={showLlmToken ? "Hide Token" : "Show Token"}>{showLlmToken ? "🙈" : "👁️"}</button>
+                          <button type="button" className="test-btn" onClick={testLlmConnection} disabled={isTestingLlm || !active.host || !active.port}>
+                            {isTestingLlm ? "Testing..." : "Test Connection"}
+                          </button>
+                        </div>
+                        {llmTestResult && (
+                          <div className={`test-badge ${llmTestResult.type}`}>
+                            {llmTestResult.text}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="form-group" style={{ marginTop: '15px' }}>
+                        <label>Select Model for this Profile</label>
+                        <select 
+                          value={selectedModelId} 
+                          onChange={(e) => handleModelChange(e.target.value)}
+                          style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-color)', color: 'var(--text-color)' }}
+                        >
+                          {models.length === 0 && <option value={selectedModelId || "local-model"}>{selectedModelId || "Default (local-model)"}</option>}
+                          {models.map(m => (
+                            <option key={m.id} value={m.id}>{m.name}</option>
+                          ))}
+                        </select>
+                        <small style={{ color: 'var(--text-color)', opacity: 0.7, marginTop: '5px', display: 'block' }}>Models are fetched when you Test Connection or on startup.</small>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
               {/* Operation Mode */}
