@@ -4,6 +4,94 @@ import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { app as electronApp, shell, BrowserWindow } from 'electron';
 
+/**
+ * Resolves a base URL cleanly from a host and optional port.
+ * Handles cloud providers (e.g. OpenRouter, OpenAI, Groq) where port is not needed,
+ * as well as local providers (Ollama, LM Studio) where host and port may be separate or combined.
+ */
+export function getLlmBaseUrl(rawHost?: string, rawPort?: string | number): string {
+  let host = (rawHost || '').trim();
+  if (!host) {
+    host = 'http://127.0.0.1';
+  }
+
+  // Ensure protocol is present
+  if (!/^https?:\/\//i.test(host)) {
+    const isHttps =
+      host.includes('openrouter.ai') ||
+      host.includes('openai.com') ||
+      host.includes('groq.com') ||
+      host.includes('anthropic.com') ||
+      String(rawPort).trim() === '443';
+    host = (isHttps ? 'https://' : 'http://') + host;
+  }
+
+  try {
+    const parsed = new URL(host);
+
+    // If a port is explicitly provided and not empty/default, attach it to authority if not already set
+    const portStr = rawPort !== undefined && rawPort !== null ? String(rawPort).trim() : '';
+    const portNum = Number(portStr);
+    if (portStr && !isNaN(portNum) && portNum > 0) {
+      if ((parsed.protocol === 'http:' && portNum !== 80) || (parsed.protocol === 'https:' && portNum !== 443)) {
+        if (!parsed.port) {
+          parsed.port = String(portNum);
+        }
+      }
+    }
+
+    // Convenience: if OpenRouter hostname is entered without path, default to /api/v1
+    if (parsed.hostname.toLowerCase() === 'openrouter.ai' && (!parsed.pathname || parsed.pathname === '/')) {
+      parsed.pathname = '/api/v1';
+    }
+
+    let pathname = parsed.pathname.replace(/\/+$/, '');
+    if (pathname === '/') pathname = '';
+
+    return `${parsed.origin}${pathname}`;
+  } catch {
+    return host.replace(/\/+$/, '');
+  }
+}
+
+/**
+ * Returns the chat completions endpoint for a given base URL.
+ * Prevents duplicating paths like /v1/v1/chat/completions.
+ */
+export function getLlmChatUrl(baseUrl: string): string {
+  const clean = baseUrl.replace(/\/+$/, '');
+  if (clean.endsWith('/chat/completions')) {
+    return clean;
+  }
+  if (clean.endsWith('/v1')) {
+    return `${clean}/chat/completions`;
+  }
+  return `${clean}/v1/chat/completions`;
+}
+
+/**
+ * Returns candidate model listing URLs to probe.
+ */
+export function getLlmModelsUrls(baseUrl: string): string[] {
+  const clean = baseUrl.replace(/\/+$/, '');
+  const urls: string[] = [];
+
+  if (clean.endsWith('/v1')) {
+    urls.push(`${clean}/models`);
+    const withoutV1 = clean.slice(0, -3).replace(/\/+$/, '');
+    if (withoutV1) {
+      urls.push(`${withoutV1}/models`);
+      urls.push(`${withoutV1}/api/tags`);
+    }
+  } else {
+    urls.push(`${clean}/v1/models`);
+    urls.push(`${clean}/models`);
+    urls.push(`${clean}/api/tags`);
+  }
+
+  return urls;
+}
+
 export function startProxyServer(port: number, configPath: string) {
   const app = express();
   app.use(cors());
@@ -160,31 +248,46 @@ export function startProxyServer(port: number, configPath: string) {
     reloadConfig();
     const activeConn = getActiveLlmConnection();
     const llmHost = activeConn?.host || config.LLM_HOST || 'http://127.0.0.1';
-    const llmPort = activeConn?.port || config.LLM_PORT || 1234;
-    const llmBase = `${llmHost}:${llmPort}`;
+    const llmPort = activeConn?.port !== undefined ? activeConn.port : config.LLM_PORT;
+    const llmBase = getLlmBaseUrl(llmHost, llmPort);
     const llmToken = getLlmApiToken();
 
-    const headers: any = {};
+    const headers: any = {
+      'HTTP-Referer': 'https://github.com/tecnoclu/g2i-for-wave',
+      'X-Title': 'G2i for Wave'
+    };
     if (llmToken) {
       headers['Authorization'] = `Bearer ${llmToken}`;
     }
 
     try {
-      // 1. Try standard OpenAI endpoint (/v1/models)
-      let response = await fetch(`${llmBase}/v1/models`, { headers }).catch(() => null);
+      const candidateUrls = getLlmModelsUrls(llmBase);
+      let response: any = null;
+      let lastError = '';
 
-      // 2. Fallback to /models
-      if (!response || !response.ok) {
-        response = await fetch(`${llmBase}/models`, { headers }).catch(() => null);
+      for (const url of candidateUrls) {
+        try {
+          const resCandidate = await fetch(url, { headers });
+          if (resCandidate.ok) {
+            response = resCandidate;
+            break;
+          } else {
+            let errText = '';
+            try {
+              const errJson = await resCandidate.json();
+              errText = errJson.error?.message || errJson.message || JSON.stringify(errJson);
+            } catch {
+              errText = await resCandidate.text().catch(() => '');
+            }
+            lastError = `HTTP ${resCandidate.status} ${resCandidate.statusText}${errText ? `: ${errText}` : ''}`;
+          }
+        } catch (fetchErr: any) {
+          lastError = fetchErr.message;
+        }
       }
 
-      // 3. Fallback to Ollama /api/tags
       if (!response || !response.ok) {
-        response = await fetch(`${llmBase}/api/tags`, { headers }).catch(() => null);
-      }
-
-      if (!response || !response.ok) {
-        return res.json({ models: [], error: 'Could not connect to LLM endpoint' });
+        return res.json({ models: [], error: `Could not connect to LLM endpoint at ${llmBase}${lastError ? ` (${lastError})` : ''}` });
       }
 
       const data = await response.json();
@@ -193,7 +296,7 @@ export function startProxyServer(port: number, configPath: string) {
       if (Array.isArray(data.data)) {
         modelsList = data.data.map((m: any) => ({
           id: m.id || m.name,
-          name: m.id || m.name
+          name: m.name && m.name !== m.id ? `${m.name} (${m.id})` : (m.id || m.name)
         }));
       } else if (Array.isArray(data.models)) {
         modelsList = data.models.map((m: any) => ({
@@ -201,6 +304,9 @@ export function startProxyServer(port: number, configPath: string) {
           name: m.name || m.id
         }));
       }
+
+      // Sort models alphabetically
+      modelsList.sort((a, b) => a.name.localeCompare(b.name));
 
       res.json({ models: modelsList });
     } catch (error: any) {
@@ -279,27 +385,48 @@ export function startProxyServer(port: number, configPath: string) {
 
   // Test LLM connection endpoint
   app.post('/api/settings/test-llm', async (req, res) => {
-    const host = req.body.llmHost || (getActiveLlmConnection()?.host) || 'http://127.0.0.1';
-    const port = req.body.llmPort || (getActiveLlmConnection()?.port) || 1234;
+    const activeConn = getActiveLlmConnection();
+    const host = req.body.llmHost || activeConn?.host || 'http://127.0.0.1';
+    const port = req.body.llmPort !== undefined ? req.body.llmPort : activeConn?.port;
     const token = req.body.llmToken !== undefined ? req.body.llmToken : getLlmApiToken();
-    const llmBase = `${host}:${port}`;
+    const llmBase = getLlmBaseUrl(host, port);
 
-    const headers: any = {};
+    const headers: any = {
+      'HTTP-Referer': 'https://github.com/tecnoclu/g2i-for-wave',
+      'X-Title': 'G2i for Wave'
+    };
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
     try {
-      let response = await fetch(`${llmBase}/v1/models`, { headers }).catch(() => null);
-      if (!response || !response.ok) {
-        response = await fetch(`${llmBase}/models`, { headers }).catch(() => null);
-      }
-      if (!response || !response.ok) {
-        response = await fetch(`${llmBase}/api/tags`, { headers }).catch(() => null);
+      const candidateUrls = getLlmModelsUrls(llmBase);
+      let response: any = null;
+      let lastError = '';
+
+      for (const url of candidateUrls) {
+        try {
+          const resCandidate = await fetch(url, { headers });
+          if (resCandidate.ok) {
+            response = resCandidate;
+            break;
+          } else {
+            let errText = '';
+            try {
+              const errJson = await resCandidate.json();
+              errText = errJson.error?.message || errJson.message || JSON.stringify(errJson);
+            } catch {
+              errText = await resCandidate.text().catch(() => '');
+            }
+            lastError = `HTTP ${resCandidate.status} ${resCandidate.statusText}${errText ? `: ${errText}` : ''}`;
+          }
+        } catch (fetchErr: any) {
+          lastError = fetchErr.message;
+        }
       }
 
       if (!response || !response.ok) {
-        return res.json({ success: false, error: `Could not connect to LLM at ${llmBase}` });
+        return res.json({ success: false, error: `Could not connect to LLM at ${llmBase}${lastError ? ` (${lastError})` : ''}` });
       }
 
       const data = await response.json();
@@ -320,8 +447,9 @@ export function startProxyServer(port: number, configPath: string) {
 
     const activeConn = getActiveLlmConnection();
     const llmHost = activeConn?.host || config.LLM_HOST || 'http://127.0.0.1';
-    const llmPort = activeConn?.port || config.LLM_PORT || 1234;
-    const llmUrl = `${llmHost}:${llmPort}/v1/chat/completions`;
+    const llmPort = activeConn?.port !== undefined ? activeConn.port : config.LLM_PORT;
+    const llmBase = getLlmBaseUrl(llmHost, llmPort);
+    const llmUrl = getLlmChatUrl(llmBase);
 
     const systemPrompt = `You are a financial analysis assistant for WaveApps. You help the user analyze their financial data and manage invoices/estimates.
 When the user asks for data or actions:
@@ -1199,7 +1327,11 @@ CRITICAL INSTRUCTIONS:
         iterations++;
         console.log(`\n[Chat] --- Iteration ${iterations} ---`);
         console.log(`[Chat] Sending request to LLM...`);
-        const llmHeaders: any = { 'Content-Type': 'application/json' };
+        const llmHeaders: any = {
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://github.com/tecnoclu/g2i-for-wave',
+          'X-Title': 'G2i for Wave'
+        };
         const llmToken = getLlmApiToken();
         if (llmToken) {
           llmHeaders['Authorization'] = `Bearer ${llmToken}`;
@@ -1227,7 +1359,14 @@ CRITICAL INSTRUCTIONS:
         });
 
         if (!llmResponse.ok) {
-          throw new Error(`LLM Error: ${llmResponse.statusText}`);
+          let errDetail = '';
+          try {
+            const errJson = await llmResponse.json();
+            errDetail = errJson.error?.message || errJson.message || JSON.stringify(errJson);
+          } catch {
+            errDetail = await llmResponse.text().catch(() => '');
+          }
+          throw new Error(`LLM Error: ${errDetail || llmResponse.statusText || `HTTP ${llmResponse.status}`}`);
         }
 
         const llmData = await llmResponse.json();

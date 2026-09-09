@@ -104,7 +104,7 @@ function App() {
     id: string;
     name: string;
     host: string;
-    port: string | number;
+    port?: string | number;
     token: string;
     selectedModelId?: string;
   }
@@ -323,10 +323,11 @@ function App() {
       return;
     }
     try {
+      const portVal = activeConn.port !== undefined && activeConn.port !== '' ? activeConn.port : undefined;
       const res = await fetch(window.api.getProxyUrl() + '/api/settings/test-llm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ llmHost: activeConn.host, llmPort: Number(activeConn.port), llmToken: activeConn.token })
+        body: JSON.stringify({ llmHost: activeConn.host, llmPort: portVal, llmToken: activeConn.token })
       });
       const data = await res.json();
       if (data.success) {
@@ -614,11 +615,11 @@ function App() {
                       <div className="form-row">
                         <div className="form-group flex-2">
                           <label>LLM Host Base URL</label>
-                          <input type="text" value={active.host} onChange={(e) => updateActiveConnection('host', e.target.value)} placeholder="http://127.0.0.1" required />
+                          <input type="text" value={active.host} onChange={(e) => updateActiveConnection('host', e.target.value)} placeholder="http://127.0.0.1 or https://openrouter.ai/api/v1" required />
                         </div>
                         <div className="form-group flex-1">
-                          <label>LLM Port</label>
-                          <input type="number" value={active.port} onChange={(e) => updateActiveConnection('port', e.target.value)} placeholder="1234" required />
+                          <label>LLM Port (Optional)</label>
+                          <input type="text" value={active.port ?? ''} onChange={(e) => updateActiveConnection('port', e.target.value)} placeholder="e.g. 1234 (optional)" />
                         </div>
                       </div>
                       <div className="form-group" style={{ marginBottom: 0 }}>
@@ -626,7 +627,7 @@ function App() {
                         <div className="input-with-button">
                           <input type={showLlmToken ? "text" : "password"} value={active.token} onChange={(e) => updateActiveConnection('token', e.target.value)} placeholder="Optional for local models" />
                           <button type="button" className="toggle-mask-btn" onClick={() => setShowLlmToken(!showLlmToken)} title={showLlmToken ? "Hide Token" : "Show Token"}>{showLlmToken ? "🙈" : "👁️"}</button>
-                          <button type="button" className="test-btn" onClick={testLlmConnection} disabled={isTestingLlm || !active.host || !active.port}>
+                          <button type="button" className="test-btn" onClick={testLlmConnection} disabled={isTestingLlm || !active.host}>
                             {isTestingLlm ? "Testing..." : "Test Connection"}
                           </button>
                         </div>
@@ -644,7 +645,12 @@ function App() {
                           onChange={(e) => handleModelChange(e.target.value)}
                           style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-color)', color: 'var(--text-color)' }}
                         >
-                          {models.length === 0 && <option value={selectedModelId || "local-model"}>{selectedModelId || "Default (local-model)"}</option>}
+                          {!models.some(m => m.id === selectedModelId) && selectedModelId && (
+                            <option value={selectedModelId}>{selectedModelId}</option>
+                          )}
+                          {models.length === 0 && !selectedModelId && (
+                            <option value="local-model">Default (local-model)</option>
+                          )}
                           {models.map(m => (
                             <option key={m.id} value={m.id}>{m.name}</option>
                           ))}
