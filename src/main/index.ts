@@ -54,7 +54,10 @@ app.whenReady().then(() => {
   initSessionDb(sessionId);
 
   // 3. Start Secure Proxy Server for Wave API
-  const configPath = join(__dirname, '../../config.local.json');
+  const userDataPath = app.getPath('userData');
+  const configPath = app.isPackaged
+    ? join(userDataPath, 'config.local.json')
+    : join(__dirname, '../../config.local.json');
   const port = 3001;
   startProxyServer(port, configPath);
 

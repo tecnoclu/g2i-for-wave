@@ -1,6 +1,6 @@
 {
   "name": "g2i-for-wave",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "G2i Desktop Assistant for WaveApps",
   "main": "./out/main/index.js",
   "scripts": {
