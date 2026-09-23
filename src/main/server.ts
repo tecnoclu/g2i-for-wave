@@ -22,6 +22,7 @@ export function getLlmBaseUrl(rawHost?: string, rawPort?: string | number): stri
       host.includes('openai.com') ||
       host.includes('groq.com') ||
       host.includes('anthropic.com') ||
+      host.includes('googleapis.com') ||
       String(rawPort).trim() === '443';
     host = (isHttps ? 'https://' : 'http://') + host;
   }
@@ -45,6 +46,17 @@ export function getLlmBaseUrl(rawHost?: string, rawPort?: string | number): stri
       parsed.pathname = '/api/v1';
     }
 
+    // Convenience: if Google AI Studio / Gemini hostname is entered without OpenAI path, default to /v1beta/openai
+    if (parsed.hostname.toLowerCase() === 'generativelanguage.googleapis.com' && (!parsed.pathname || parsed.pathname === '/')) {
+      parsed.pathname = '/v1beta/openai';
+    }
+
+    // Convenience: if generic googleapis.com is entered, route to Google AI Studio OpenAI endpoint
+    if (parsed.hostname.toLowerCase() === 'googleapis.com' && (!parsed.pathname || parsed.pathname === '/')) {
+      parsed.hostname = 'generativelanguage.googleapis.com';
+      parsed.pathname = '/v1beta/openai';
+    }
+
     let pathname = parsed.pathname.replace(/\/+$/, '');
     if (pathname === '/') pathname = '';
 
@@ -63,7 +75,7 @@ export function getLlmChatUrl(baseUrl: string): string {
   if (clean.endsWith('/chat/completions')) {
     return clean;
   }
-  if (clean.endsWith('/v1')) {
+  if (clean.endsWith('/v1') || clean.endsWith('/openai')) {
     return `${clean}/chat/completions`;
   }
   return `${clean}/v1/chat/completions`;
@@ -76,7 +88,10 @@ export function getLlmModelsUrls(baseUrl: string): string[] {
   const clean = baseUrl.replace(/\/+$/, '');
   const urls: string[] = [];
 
-  if (clean.endsWith('/v1')) {
+  if (clean.endsWith('/openai')) {
+    urls.push(`${clean}/models`);
+    urls.push(`${clean}/v1/models`);
+  } else if (clean.endsWith('/v1')) {
     urls.push(`${clean}/models`);
     const withoutV1 = clean.slice(0, -3).replace(/\/+$/, '');
     if (withoutV1) {
@@ -466,7 +481,7 @@ When the user asks for data or actions:
 The user is currently viewing business ID: ${businessId}.
 
 CRITICAL INSTRUCTIONS:
-1. If the user asks for invoices by PO Number, Customer Name, Invoice Number, or Date Range, ALWAYS use the 'search_cached_invoices' tool. It is much faster than raw GraphQL.
+1. If the user asks for invoices (including filtering by PO Number, invoices with no/missing PO, non-numeric PO, Customer Name, Invoice Number, Status, or Date Range), ALWAYS use the 'search_cached_invoices' tool. It is much faster than raw GraphQL.
 2. If the user asks for customers, ALWAYS use 'search_cached_customers'. It returns outstanding and overdue balances and aggregates them.
 3. If the user asks for products, ALWAYS use 'list_cached_products'.
 4. If the user wants to create a DRAFT invoice, create an estimate, send an estimate, or approve an estimate, ALWAYS use the 'manage_invoice_or_estimate' tool.
@@ -484,6 +499,10 @@ CRITICAL INSTRUCTIONS:
     - NEVER guess, predict, extrapolate, or fabricate any data (such as products, descriptions, prices, quantities, taxes, outstanding amounts, statuses, names, or contact info) based on patterns or context. The raw JSON results of tools from previous prompts are not preserved in the chat history.
     - If no tool exists that can provide the requested information, state clearly that you do not have access to that data, rather than attempting to estimate or hallucinate.
 11. MANDATORY TOOL EXECUTION POLICY: You MUST NOT ask the user "Would you like me to run a search?" or "Should I use a tool?". If you need data to answer the user's prompt, YOU MUST immediately call the appropriate tool. Do not ask for permission.
+12. LIGHTWEIGHT DATA POLICY:
+    - 'search_cached_invoices' natively computes complete, perfect math sums in the 'summary' block across all matching invoices.
+    - It returns concise invoice row summaries (without heavy line-item trees by default) to keep your context window lean and fast.
+    - If the user specifically asks for individual line items or products within invoices, set 'includeLineItems: true'.
 
 ### WAVE APPS GRAPHQL SCHEMA REFERENCE:
 **Invoice**: id, invoiceNumber, poNumber, invoiceDate (Date), dueDate (Date), amountDue { value }, amountPaid { value }, total { value }, status, customer { id name }, items { description quantity price subtotal { value } total { value } product { id name } taxes { amount { value } salesTax { id name } } }
@@ -550,16 +569,20 @@ CRITICAL INSTRUCTIONS:
         type: "function",
         function: {
           name: "search_cached_invoices",
-          description: "Search local cache of invoices. Extremely fast. Best for PO Number, Customer Name, Invoice Number, Date Range, or Status searches. It automatically calculates sums.",
+          description: "Search local cache of invoices. Extremely fast. Supports filtering by PO Number, missing/empty PO numbers (hasNoPo), non-numeric PO numbers (nonNumericPoOnly), Customer Name, Invoice Number, Date Range, or Status. Automatically calculates exact mathematical sums and breakdowns.",
           parameters: {
             type: "object",
             properties: {
-              poNumber: { type: "string" },
-              customerName: { type: "string" },
-              invoiceNumber: { type: "string" },
-              status: { type: "string" },
+              poNumber: { type: "string", description: "Filter by exact or partial PO Number" },
+              hasNoPo: { type: "boolean", description: "Set to true to find invoices that have NO PO Number (empty, null, or whitespace only)" },
+              nonNumericPoOnly: { type: "boolean", description: "Set to true to find invoices where PO Number is NOT purely numeric (e.g. missing, contains letters, words, or symbols)" },
+              customerName: { type: "string", description: "Filter by customer name (partial case-insensitive match)" },
+              invoiceNumber: { type: "string", description: "Filter by invoice number" },
+              status: { type: "string", description: "Filter by invoice status (e.g. PAID, UNPAID, DRAFT, OVERDUE, VIEWED)" },
               dateStart: { type: "string", description: "Format: YYYY-MM-DD" },
               dateEnd: { type: "string", description: "Format: YYYY-MM-DD" },
+              includeLineItems: { type: "boolean", description: "Set to true ONLY if you need itemized line items. Default is false to keep context compact." },
+              limit: { type: "number", description: "Max invoice rows to return in the list (default 50). Summary totals always include ALL matching invoices." },
               forceRefresh: { type: "boolean", description: "Set to true ONLY if the user explicitly approved a fresh download." }
             }
           }
@@ -775,7 +798,14 @@ CRITICAL INSTRUCTIONS:
       }
 
       let results = cache.invoices;
-      if (args.poNumber) results = results.filter((i: any) => i.poNumber && i.poNumber.includes(args.poNumber));
+      if (args.hasNoPo === true || args.hasNoPo === 'true') {
+        results = results.filter((i: any) => !i.poNumber || i.poNumber.trim() === '');
+      } else if (args.nonNumericPoOnly === true || args.nonNumericPoOnly === 'true') {
+        // Anything other than a purely numeric PO number (e.g. empty, or containing non-digits)
+        results = results.filter((i: any) => !i.poNumber || !/^\d+$/.test(i.poNumber.trim()));
+      } else if (args.poNumber) {
+        results = results.filter((i: any) => i.poNumber && i.poNumber.toLowerCase().includes(String(args.poNumber).toLowerCase()));
+      }
       if (args.customerName) results = results.filter((i: any) => i.customer && i.customer.name.toLowerCase().includes(args.customerName.toLowerCase()));
       if (args.status) results = results.filter((i: any) => i.status === args.status);
       if (args.invoiceNumber) results = results.filter((i: any) => i.invoiceNumber && i.invoiceNumber.includes(args.invoiceNumber));
@@ -886,8 +916,35 @@ CRITICAL INSTRUCTIONS:
         };
       });
 
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 50;
+      const includeLineItems = Boolean(args.includeLineItems);
+
+      const projectedInvoices = results.slice(0, limit).map((i: any) => {
+        const base: any = {
+          id: i.id,
+          invoiceNumber: i.invoiceNumber,
+          poNumber: i.poNumber || null,
+          invoiceDate: i.invoiceDate,
+          customerName: i.customer?.name || null,
+          status: i.status,
+          total: i.total?.value,
+          amountDue: i.amountDue?.value
+        };
+        if (includeLineItems && i.items) {
+          base.items = i.items.map((item: any) => ({
+            productName: item.product?.name || null,
+            description: item.description,
+            quantity: item.quantity,
+            price: item.price,
+            lineTotal: item.total?.value || item.subtotal?.value
+          }));
+        }
+        return base;
+      });
+
       const response: any = {
         summary: {
+          matchingInvoiceCount: results.length,
           totalInvoiced: parseFloat(totalInvoiced.toFixed(2)),
           totalOutstanding: parseFloat(totalOutstanding.toFixed(2)),
           totalPaid: parseFloat(totalPaid.toFixed(2)),
@@ -897,8 +954,9 @@ CRITICAL INSTRUCTIONS:
           productsBreakdown: formattedProducts
         },
         totalCachedInvoices: cache.invoices.length,
-        returnedResults: results.length,
-        invoices: results
+        returnedResultsCount: results.length,
+        invoicesDisplayed: projectedInvoices.length,
+        invoices: projectedInvoices
       };
 
       if (isExpired) {
@@ -963,14 +1021,26 @@ CRITICAL INSTRUCTIONS:
          }
       });
 
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 50;
+      const projectedCustomers = results.slice(0, limit).map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        email: c.email || null,
+        phone: c.phone || null,
+        outstandingAmount: c.outstandingAmount?.value,
+        overdueAmount: c.overdueAmount?.value
+      }));
+
       const response: any = {
         summary: {
+          matchingCustomerCount: results.length,
           totalOutstanding: parseFloat(totalOutstanding.toFixed(2)),
           totalOverdue: parseFloat(totalOverdue.toFixed(2))
         },
         totalCachedCustomers: cache.customers.length,
-        returnedResults: results.length,
-        customers: results
+        returnedResultsCount: results.length,
+        customersDisplayed: projectedCustomers.length,
+        customers: projectedCustomers
       };
 
       if (isExpired) {
@@ -1021,10 +1091,22 @@ CRITICAL INSTRUCTIONS:
         results = results.filter((p: any) => p.name && p.name.toLowerCase().includes(args.name.toLowerCase()));
       }
 
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 50;
+      const projectedProducts = results.slice(0, limit).map((p: any) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description || null,
+        unitPrice: p.unitPrice,
+        isSold: p.isSold,
+        isBought: p.isBought,
+        taxes: p.defaultSalesTaxes?.map((t: any) => ({ name: t.name, rate: t.rate }))
+      }));
+
       const response: any = {
         totalCachedProducts: cache.products.length,
-        returnedResults: results.length,
-        products: results
+        returnedResultsCount: results.length,
+        productsDisplayed: projectedProducts.length,
+        products: projectedProducts
       };
 
       if (isExpired) {
@@ -1372,6 +1454,11 @@ CRITICAL INSTRUCTIONS:
         const llmData = await llmResponse.json();
         clearTimeout(timeoutId); // Clear timeout on success
         
+        if (!llmData || !llmData.choices || !llmData.choices[0] || !llmData.choices[0].message) {
+          const detail = llmData?.error?.message || JSON.stringify(llmData);
+          throw new Error(`LLM provider returned unexpected response structure: ${detail}`);
+        }
+
         const responseMessage = llmData.choices[0].message;
         
         // Fix for local LLMs (like Ollama/LM Studio) that crash or hang when content is null
@@ -1394,7 +1481,10 @@ CRITICAL INSTRUCTIONS:
         let isXmlToolCall = false;
         let xmlQuery = '';
 
-        if (contentStr.includes('<function=query_wave_graphql>') || contentStr.includes('query {') || contentStr.includes('<tool_call>')) {
+        const hasNativeToolCalls = Array.isArray(responseMessage.tool_calls) && responseMessage.tool_calls.length > 0;
+
+        // ONLY trigger XML fallback if there are NO native tool calls
+        if (!hasNativeToolCalls && (contentStr.includes('<function=query_wave_graphql>') || contentStr.includes('<tool_call>'))) {
           const match = contentStr.match(/<parameter=query>([\s\S]*?)<\/parameter>/);
           if (match && match[1]) {
             isXmlToolCall = true;
@@ -1411,14 +1501,29 @@ CRITICAL INSTRUCTIONS:
           }
         }
 
-        if ((responseMessage.tool_calls && responseMessage.tool_calls.length > 0) || isXmlToolCall) {
+        if (hasNativeToolCalls || isXmlToolCall) {
           
+          // Ensure every tool call in responseMessage.tool_calls has a unique valid non-empty id
+          if (responseMessage.tool_calls) {
+            for (let i = 0; i < responseMessage.tool_calls.length; i++) {
+              if (!responseMessage.tool_calls[i].id) {
+                responseMessage.tool_calls[i].id = `call_${Date.now()}_${i}`;
+              }
+            }
+          }
+
           // Append the assistant's message with the tool_calls first
           const cleanAssistantMessage: any = {
-            role: "assistant",
-            content: responseMessage.content || "",
-            tool_calls: responseMessage.tool_calls
+            role: "assistant"
           };
+          if (hasNativeToolCalls) {
+            cleanAssistantMessage.tool_calls = responseMessage.tool_calls;
+            // Cross-provider compatibility (OpenAI, Anthropic via OpenRouter, Google AI Studio):
+            // If tool_calls are present and content is empty/whitespace, use null so strict providers don't reject empty string
+            cleanAssistantMessage.content = responseMessage.content && responseMessage.content.trim().length > 0 ? responseMessage.content : null;
+          } else {
+            cleanAssistantMessage.content = responseMessage.content || "";
+          }
           messages.push(cleanAssistantMessage);
 
           // Prepare array of calls to process
@@ -1431,12 +1536,17 @@ CRITICAL INSTRUCTIONS:
               args: { query: xmlQuery }
             });
           } else if (responseMessage.tool_calls) {
-            for (const tc of responseMessage.tool_calls) {
-              let parsedArgs = {};
-              try {
-                parsedArgs = JSON.parse(tc.function.arguments);
-              } catch (e) {
-                console.warn('[Chat] Failed to parse tool arguments:', tc.function.arguments);
+            for (let i = 0; i < responseMessage.tool_calls.length; i++) {
+              const tc = responseMessage.tool_calls[i];
+              let parsedArgs: any = {};
+              if (typeof tc.function.arguments === 'object' && tc.function.arguments !== null) {
+                parsedArgs = tc.function.arguments;
+              } else {
+                try {
+                  parsedArgs = JSON.parse(tc.function.arguments || '{}');
+                } catch (e) {
+                  console.warn('[Chat] Failed to parse tool arguments:', tc.function.arguments);
+                }
               }
               toolCallsToProcess.push({
                 id: tc.id,
@@ -1521,7 +1631,6 @@ CRITICAL INSTRUCTIONS:
                  messages.push({
                    role: "tool",
                    tool_call_id: tc.id,
-                   name: executedToolName,
                    content: "You already executed this exact same query. Please stop querying and provide the final natural language answer to the user based on the data you have."
                  });
                  continue;
@@ -1536,18 +1645,40 @@ CRITICAL INSTRUCTIONS:
               }
             }
 
-            let resultString = JSON.stringify(queryResult);
+            // Safe, valid JSON serialization (clean structural pruning instead of broken mid-string substring)
+            let resultString = '';
             const maxChars = (config.MAX_CONTEXT_TOKENS || 8192) * 4;
-            if (resultString.length > maxChars) {
-              console.log('[Chat] Truncating Tool API Response...');
-              resultString = resultString.substring(0, maxChars) + '... [TRUNCATED DUE TO CONTEXT LIMITS]';
+            const rawJson = JSON.stringify(queryResult);
+            if (rawJson.length > maxChars) {
+              console.log('[Chat] Tool API Response exceeds limit, truncating arrays cleanly...');
+              if (queryResult.invoices && Array.isArray(queryResult.invoices)) {
+                const half = Math.max(1, Math.floor(queryResult.invoices.length / 2));
+                queryResult.invoices = queryResult.invoices.slice(0, half);
+                queryResult.notice = `Results capped to ${half} rows to stay within provider context bounds. Summary calculations reflect the entire dataset.`;
+              } else if (queryResult.customers && Array.isArray(queryResult.customers)) {
+                const half = Math.max(1, Math.floor(queryResult.customers.length / 2));
+                queryResult.customers = queryResult.customers.slice(0, half);
+                queryResult.notice = `Results capped to ${half} rows to stay within provider context bounds.`;
+              } else if (queryResult.products && Array.isArray(queryResult.products)) {
+                const half = Math.max(1, Math.floor(queryResult.products.length / 2));
+                queryResult.products = queryResult.products.slice(0, half);
+                queryResult.notice = `Results capped to ${half} rows to stay within provider context bounds.`;
+              }
+              resultString = JSON.stringify(queryResult);
+              if (resultString.length > maxChars) {
+                resultString = JSON.stringify({
+                  summary: queryResult.summary || "Summary data omitted due to size limits.",
+                  notice: "Payload was too large for model context. Please narrow your query filter."
+                });
+              }
+            } else {
+              resultString = rawJson;
             }
 
             if (!tc.isXml) {
               messages.push({
                 role: "tool",
                 tool_call_id: tc.id,
-                name: executedToolName,
                 content: resultString
               });
             } else {

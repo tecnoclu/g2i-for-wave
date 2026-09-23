@@ -430,7 +430,10 @@ function App() {
       });
       const data = await res.json();
       
-      if (data.error) throw new Error(data.error);
+      if (data.error) {
+        const errorMsg = data.details ? `${data.error}: ${data.details}` : data.error;
+        throw new Error(errorMsg);
+      }
       
       setMessages(prev => [...prev, { role: 'assistant', content: data.answer }]);
     } catch (err: any) {
@@ -615,11 +618,14 @@ function App() {
                       <div className="form-row">
                         <div className="form-group flex-2">
                           <label>LLM Host Base URL</label>
-                          <input type="text" value={active.host} onChange={(e) => updateActiveConnection('host', e.target.value)} placeholder="http://127.0.0.1 or https://openrouter.ai/api/v1" required />
+                          <input type="text" value={active.host} onChange={(e) => updateActiveConnection('host', e.target.value)} placeholder="e.g. https://generativelanguage.googleapis.com/v1beta/openai or http://127.0.0.1" required />
+                          <small style={{ color: 'var(--text-color)', opacity: 0.7, marginTop: '4px', display: 'block' }}>
+                            For Google AI Studio: <code>https://generativelanguage.googleapis.com/v1beta/openai</code>
+                          </small>
                         </div>
                         <div className="form-group flex-1">
                           <label>LLM Port (Optional)</label>
-                          <input type="text" value={active.port ?? ''} onChange={(e) => updateActiveConnection('port', e.target.value)} placeholder="e.g. 1234 (optional)" />
+                          <input type="text" value={active.port ?? ''} onChange={(e) => updateActiveConnection('port', e.target.value)} placeholder="e.g. 1234 (leave blank for Google)" />
                         </div>
                       </div>
                       <div className="form-group" style={{ marginBottom: 0 }}>
