@@ -1428,20 +1428,35 @@ CRITICAL INSTRUCTIONS:
           abortController.abort();
         }, 120000);
 
-        const llmResponse = await fetch(llmUrl, {
-          method: 'POST',
-          headers: llmHeaders,
-          signal: abortController.signal,
-          body: JSON.stringify({
-            model: activeModel,
-            messages: messages,
-            tools: tools,
-            tool_choice: "auto",
-            max_tokens: 1500
-          })
-        });
+        let llmResponse: any = null;
+        let lastErrText = '';
+        const maxRetries = 2;
 
-        if (!llmResponse.ok) {
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          if (attempt > 0) {
+            const delayMs = attempt * 2500;
+            console.log(`[Chat] Upstream returned temporary overload (503/429). Retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
+            await new Promise(res => setTimeout(res, delayMs));
+          }
+
+          llmResponse = await fetch(llmUrl, {
+            method: 'POST',
+            headers: llmHeaders,
+            signal: abortController.signal,
+            body: JSON.stringify({
+              model: activeModel,
+              messages: messages,
+              tools: tools,
+              tool_choice: "auto",
+              max_tokens: 1500
+            })
+          });
+
+          if (llmResponse.ok) {
+            break;
+          }
+
+          // Read error detail
           let errDetail = '';
           try {
             const errJson = await llmResponse.json();
@@ -1449,7 +1464,19 @@ CRITICAL INSTRUCTIONS:
           } catch {
             errDetail = await llmResponse.text().catch(() => '');
           }
-          throw new Error(`LLM Error: ${errDetail || llmResponse.statusText || `HTTP ${llmResponse.status}`}`);
+
+          lastErrText = errDetail || llmResponse.statusText || `HTTP ${llmResponse.status}`;
+
+          // Only retry on temporary server spikes (503 / 429)
+          if ((llmResponse.status === 503 || llmResponse.status === 429 || lastErrText.includes('high demand') || lastErrText.includes('temporarily')) && attempt < maxRetries) {
+            continue;
+          }
+
+          throw new Error(`LLM Error: ${lastErrText}`);
+        }
+
+        if (!llmResponse || !llmResponse.ok) {
+          throw new Error(`LLM Error: ${lastErrText}`);
         }
 
         const llmData = await llmResponse.json();
