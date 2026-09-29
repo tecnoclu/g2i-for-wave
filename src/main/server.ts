@@ -503,7 +503,13 @@ CRITICAL INSTRUCTIONS:
 12. LIGHTWEIGHT DATA POLICY:
     - 'search_cached_invoices' natively computes complete, perfect math sums in the 'summary' block across all matching invoices.
     - It returns concise invoice row summaries (without heavy line-item trees by default) to keep your context window lean and fast.
+    - Each invoice includes 'itemDescriptions' (summary of products/services) and 'memo' (notes). Use these when the user asks for descriptions or notes in their summary.
     - If the user specifically asks for individual line items or products within invoices, set 'includeLineItems: true'.
+13. SPREADSHEET / EXCEL EXPORT POLICY:
+    - When the user asks to export invoices to Excel / CSV, ALWAYS use the 'export_invoices_report' tool.
+    - CRITICAL: You MUST pass the EXACT same filters (such as 'customerName', 'poNumber', 'hasNoPo', 'status', 'dateStart', 'dateEnd') that match the invoices displayed on screen! This ensures the exported spreadsheet matches what is on screen 100%.
+    - Set 'includeLineItems: true' so every individual line item, description, and price has its own column.
+    - Do NOT auto-open files unless the user explicitly requested to open it (keep autoOpen: false). Files are saved directly to their Downloads folder.
 
 ### WAVE APPS GRAPHQL SCHEMA REFERENCE:
 **Invoice**: id, invoiceNumber, poNumber, invoiceDate (Date), dueDate (Date), amountDue { value }, amountPaid { value }, total { value }, status, customer { id name }, items { description quantity price subtotal { value } total { value } product { id name } taxes { amount { value } salesTax { id name } } }
@@ -655,11 +661,11 @@ CRITICAL INSTRUCTIONS:
         type: "function",
         function: {
           name: "export_to_spreadsheet",
-          description: "Generates a CSV spreadsheet file locally in the user's Downloads folder from the provided data and opens it in their default spreadsheet application (Excel/Numbers). Use this when the user asks to export data to Excel or CSV.",
+          description: "Generates a CSV spreadsheet file locally in the user's Downloads folder from the provided data. Default behavior saves the file without opening it unless autoOpen: true is explicitly requested.",
           parameters: {
             type: "object",
             properties: {
-              filename: { type: "string", description: "Name of the file, e.g. invoices_2026.csv (must end in .csv)" },
+              filename: { type: "string", description: "Name of the file, e.g. export_2026.csv (must end in .csv)" },
               headers: {
                 type: "array",
                 items: { type: "string" },
@@ -672,6 +678,10 @@ CRITICAL INSTRUCTIONS:
                   description: "Object mapping header/column names to row cell values"
                 },
                 description: "Array of data row objects, matching the keys in headers"
+              },
+              autoOpen: {
+                type: "boolean",
+                description: "Set to true ONLY if the user explicitly requested to open the spreadsheet file automatically. Defaults to false."
               }
             },
             required: ["headers", "rows"]
@@ -682,15 +692,21 @@ CRITICAL INSTRUCTIONS:
         type: "function",
         function: {
           name: "export_invoices_report",
-          description: "Generates a customized, flattened CSV spreadsheet of invoices directly on the backend, saves it to the user's Downloads folder, and opens it. ALWAYS use this instead of export_to_spreadsheet when exporting invoices because it processes line items instantly without taxing LLM context/latency bounds.",
+          description: "Generates a customized, flattened CSV spreadsheet of invoices directly on the backend and saves it to the user's Downloads folder. ALWAYS use this instead of export_to_spreadsheet when exporting invoices because it flattens line items natively. Pass the EXACT same filters (customerName, poNumber, hasNoPo, status, dates) matching what the user sees on screen.",
           parameters: {
             type: "object",
             properties: {
               filename: { type: "string", description: "Name of the file, e.g. invoices_2026.csv (must end in .csv)" },
+              poNumber: { type: "string", description: "Filter by exact or partial PO Number so the export matches what is displayed on screen." },
+              hasNoPo: { type: "boolean", description: "Set to true to export invoices that have NO PO Number (empty/null)." },
+              nonNumericPoOnly: { type: "boolean", description: "Set to true to export invoices where PO Number is NOT purely numeric." },
+              customerName: { type: "string", description: "Filter by customer name (partial case-insensitive match)" },
+              invoiceNumber: { type: "string", description: "Filter by invoice number" },
+              status: { type: "string", description: "Filter by invoice status (e.g. PAID, UNPAID, DRAFT, OVERDUE, VIEWED)" },
               dateStart: { type: "string", description: "Filter start date (YYYY-MM-DD)" },
               dateEnd: { type: "string", description: "Filter end date (YYYY-MM-DD)" },
-              customerName: { type: "string", description: "Filter by customer name (partial case-insensitive match)" },
-              includeLineItems: { type: "boolean", description: "Set to true to flatten and include all individual line items (multiple rows per invoice if needed). Set to false for invoice summaries." },
+              includeLineItems: { type: "boolean", description: "Set to true to flatten and include all individual line items with descriptions and prices. Default is true for detailed export." },
+              autoOpen: { type: "boolean", description: "Set to true ONLY if the user explicitly asked to automatically open the file. Defaults to false (saves to Downloads without opening)." },
               forceRefresh: { type: "boolean", description: "Set to true ONLY if the user explicitly approved a fresh download." },
               projection: {
                 type: "array",
@@ -698,14 +714,14 @@ CRITICAL INSTRUCTIONS:
                   type: "object",
                   properties: {
                     header: { type: "string", description: "Spreadsheet column header label, e.g. 'Client Name', 'Total'" },
-                    path: { type: "string", description: "JSON path relative to the invoice object. For line items, start with 'item.' e.g. 'invoiceNumber', 'poNumber', 'invoiceDate', 'customer.name', 'status', 'amountDue.value', 'total.value', 'item.product.name', 'item.description', 'item.quantity', 'item.price', 'item.taxes', 'item.lineTotal', 'item.taxAmount', 'item.totalWithTax'" }
+                    path: { type: "string", description: "JSON path relative to the invoice object. For line items, start with 'item.' e.g. 'invoiceNumber', 'poNumber', 'invoiceDate', 'customer.name', 'status', 'memo', 'amountDue.value', 'total.value', 'item.product.name', 'item.description', 'item.quantity', 'item.price', 'item.taxes', 'item.lineTotal', 'item.taxAmount', 'item.totalWithTax'" }
                   },
                   required: ["header", "path"]
                 },
-                description: "Optional custom column headers and path projection map. If omitted, a standard set of default columns is exported."
+                description: "Optional custom column headers and path projection map. If omitted, a standard set of default columns (including line items and memo/notes) is exported."
               }
             },
-            required: ["filename", "includeLineItems"]
+            required: ["filename"]
           }
         }
       },
@@ -775,7 +791,7 @@ CRITICAL INSTRUCTIONS:
         let hasNext = true;
         let page = 1;
         while(hasNext) {
-          const q = `query { business(id: "${businessId}") { invoices(page: ${page}, pageSize: 100) { pageInfo { currentPage totalPages } edges { node { id poNumber invoiceDate invoiceNumber status amountDue { value } total { value } customer { name } items { product { id name } description quantity price subtotal { value } total { value } taxes { amount { value } salesTax { id name } } } } } } } }`;
+          const q = `query { business(id: "${businessId}") { invoices(page: ${page}, pageSize: 100) { pageInfo { currentPage totalPages } edges { node { id poNumber invoiceDate invoiceNumber status memo amountDue { value } total { value } customer { name } items { product { id name } description quantity price subtotal { value } total { value } taxes { amount { value } salesTax { id name } } } } } } } }`;
           const res = await runWaveQuery(q, {}, waveToken);
           const invConnection = res.data?.business?.invoices;
           if (!invConnection) break;
@@ -928,8 +944,10 @@ CRITICAL INSTRUCTIONS:
           invoiceDate: i.invoiceDate,
           customerName: i.customer?.name || null,
           status: i.status,
+          memo: i.memo || null,
           total: i.total?.value,
-          amountDue: i.amountDue?.value
+          amountDue: i.amountDue?.value,
+          itemDescriptions: i.items?.map((it: any) => it.description || it.product?.name).filter(Boolean).join('; ') || null
         };
         if (includeLineItems && i.items) {
           base.items = i.items.map((item: any) => ({
@@ -1171,13 +1189,32 @@ CRITICAL INSTRUCTIONS:
 
     // Helper to export invoices report with proxy-side flattening and dynamic projection
     async function executeExportInvoicesReport(args: any) {
-      // Ensure cache is loaded and get filtered results (reusing the cache search helper)
-      const searchRes = await executeSearchInvoices({
-        forceRefresh: args.forceRefresh,
-        customerName: args.customerName
-      });
-      
-      let invoices = searchRes.invoices;
+      // Ensure cache is loaded
+      let cache = globalInvoiceCache[businessId];
+      if (!cache || cache.invoices.length === 0 || args.forceRefresh) {
+        await executeSearchInvoices({ forceRefresh: true });
+        cache = globalInvoiceCache[businessId];
+      }
+
+      let invoices = cache?.invoices ? [...cache.invoices] : [];
+
+      // Apply the exact same filters as search_cached_invoices so export matches what is on screen
+      if (args.hasNoPo === true || args.hasNoPo === 'true') {
+        invoices = invoices.filter((i: any) => !i.poNumber || i.poNumber.trim() === '');
+      } else if (args.nonNumericPoOnly === true || args.nonNumericPoOnly === 'true') {
+        invoices = invoices.filter((i: any) => !i.poNumber || !/^\d+$/.test(i.poNumber.trim()));
+      } else if (args.poNumber) {
+        invoices = invoices.filter((i: any) => i.poNumber && i.poNumber.toLowerCase().includes(String(args.poNumber).toLowerCase()));
+      }
+      if (args.customerName) {
+        invoices = invoices.filter((i: any) => i.customer && i.customer.name.toLowerCase().includes(args.customerName.toLowerCase()));
+      }
+      if (args.status) {
+        invoices = invoices.filter((i: any) => i.status === args.status);
+      }
+      if (args.invoiceNumber) {
+        invoices = invoices.filter((i: any) => i.invoiceNumber && i.invoiceNumber.includes(args.invoiceNumber));
+      }
       
       // Filter by date range if provided
       if (args.dateStart || args.dateEnd) {
@@ -1214,6 +1251,7 @@ CRITICAL INSTRUCTIONS:
         { header: 'Invoice Date', path: 'invoiceDate' },
         { header: 'Customer Name', path: 'customer.name' },
         { header: 'Status', path: 'status' },
+        { header: 'Notes / Memo', path: 'memo' },
         { header: 'Product/Service', path: 'item.product.name' },
         { header: 'Description', path: 'item.description' },
         { header: 'Quantity', path: 'item.quantity' },
@@ -1229,10 +1267,13 @@ CRITICAL INSTRUCTIONS:
       const projection = args.projection && args.projection.length > 0 ? args.projection : defaultProjection;
       const headers = projection.map((p: any) => p.header);
       
+      // Default includeLineItems to true for spreadsheet reports unless explicitly disabled
+      const includeLineItems = args.includeLineItems !== false;
+
       // Flatten data into spreadsheet rows
       const rows: any[] = [];
       invoices.forEach((inv: any) => {
-        if (args.includeLineItems && inv.items && inv.items.length > 0) {
+        if (includeLineItems && inv.items && inv.items.length > 0) {
           inv.items.forEach((item: any) => {
             const row: any = {};
             projection.forEach((proj: any) => {
@@ -1311,18 +1352,22 @@ CRITICAL INSTRUCTIONS:
       const filePath = join(downloadsDir, filename);
       
       writeFileSync(filePath, csvContent, 'utf8');
-      await shell.openPath(filePath);
+
+      // Do NOT automatically open Excel unless explicitly requested
+      if (args.autoOpen === true) {
+        await shell.openPath(filePath);
+      }
       
       return {
         success: true,
         filePath,
         totalInvoicesProcessed: invoices.length,
         totalRowsGenerated: rows.length,
-        message: `Successfully generated report containing ${invoices.length} invoices (${rows.length} rows) and opened the file.`
+        message: `Successfully generated report containing ${invoices.length} invoices (${rows.length} rows) and saved to ${filePath}.${args.autoOpen ? ' File opened.' : ' (File saved to your Downloads folder without auto-opening).'}`
       };
     }
 
-    // Helper to export data to CSV and open it
+    // Helper to export data to CSV
     async function executeExportToSpreadsheet(args: any) {
       const filename = args.filename || `export_${Date.now()}.csv`;
       const headers = args.headers as string[];
@@ -1344,9 +1389,17 @@ CRITICAL INSTRUCTIONS:
       const filePath = join(downloadsDir, filename);
       
       writeFileSync(filePath, csvContent, 'utf8');
-      await shell.openPath(filePath);
+
+      // Do NOT automatically open Excel unless explicitly requested
+      if (args.autoOpen === true) {
+        await shell.openPath(filePath);
+      }
       
-      return { success: true, filePath, message: `Successfully exported to ${filePath} and opened the file.` };
+      return { 
+        success: true, 
+        filePath, 
+        message: `Successfully exported to ${filePath}.${args.autoOpen ? ' File opened.' : ' (File saved to your Downloads folder without auto-opening).'}` 
+      };
     }
 
     // Helper to generate a styled PDF report and open it
