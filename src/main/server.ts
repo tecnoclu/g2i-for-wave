@@ -340,7 +340,8 @@ export function startProxyServer(port: number, configPath: string) {
       OPERATION_MODE: config.OPERATION_MODE || 'READ_ONLY',
       MAX_CONTEXT_TOKENS: config.MAX_CONTEXT_TOKENS || 262144,
       SELECTED_BUSINESS_ID: config.SELECTED_BUSINESS_ID || '',
-      SELECTED_MODEL_ID: config.SELECTED_MODEL_ID || ''
+      SELECTED_MODEL_ID: config.SELECTED_MODEL_ID || '',
+      APP_VERSION: electronApp ? electronApp.getVersion() : '1.0.5'
     });
   });
 

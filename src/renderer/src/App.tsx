@@ -92,6 +92,7 @@ function App() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string>('1.0.5');
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -181,6 +182,7 @@ function App() {
     fetch(window.api.getProxyUrl() + '/api/settings')
       .then(res => res.json())
       .then(settings => {
+        if (settings.APP_VERSION) setAppVersion(settings.APP_VERSION);
         loadBusinesses(settings.SELECTED_BUSINESS_ID);
         
         // Find the active profile to load its specific model
@@ -451,7 +453,14 @@ function App() {
   return (
     <div className="app-container">
       <header className="app-header">
-        <h1>G2i for Wave</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <h1 style={{ margin: 0 }}>G2i for Wave</h1>
+          {appVersion && (
+            <span style={{ fontSize: '0.72rem', opacity: 0.6, fontWeight: 500, padding: '2px 6px', background: 'rgba(255,255,255,0.08)', borderRadius: '4px' }}>
+              v{appVersion}
+            </span>
+          )}
+        </div>
         
         <div className="header-controls">
           <div className="selector-group">
