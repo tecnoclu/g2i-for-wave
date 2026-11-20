@@ -18,6 +18,7 @@ function createWindow(): void {
     height: 768,
     show: false,
     autoHideMenuBar: true,
+    icon: join(__dirname, '../../build/icon.png'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false // Sandbox off to allow preload to use Node.js if needed
